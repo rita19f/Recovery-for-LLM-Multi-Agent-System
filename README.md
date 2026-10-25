@@ -195,8 +195,9 @@ python3 scripts/aggregate_results.py \
 ```
 
 The aggregation pipeline retains errors and timeouts in the primary success
-denominator and emits run-level, condition-level, paired-recovery, failure, and
-machine-readable summary files.
+denominator and emits run-level, condition-level, paired-run,
+paired-condition, failure, and machine-readable summary files. Fault funnel
+rates explicitly report both completed-run and all-planned-run denominators.
 
 ## Output and metric semantics
 
@@ -213,16 +214,22 @@ calls.json
 Important summary fields:
 
 - `fault_metrics`: injection, delivery, planner exposure, declared/structured
-  dependency, plan relevance, executed harm, and caused failure;
+  dependency, plan relevance, executed harm, caused failure, affected stages,
+  blocked unsafe-action attempts, and executed unauthorized actions;
 - `dependency_quality`: plan-level TP/FP/FN/TN, precision, and recall;
-- `detection`: the chargeable prefix boundary;
+- `fault_declared_phase`, `fault_injection_phase`, and
+  `fault_injection_tick`: the precommitted and observed injection schedule;
+- `detection`: the chargeable prefix boundary and observed delay;
 - `paired_baselines.no_recovery`: complete first faulty attempt;
-- `paired_baselines.full_restart`: shared prefix through detection plus restart;
+- `paired_baselines.full_restart`: shared prefix through detection plus restart,
+  including wasted action/call/token counts for the discarded prefix;
 - top-level `backend_calls`, `usage`, and `latency_ms`: actual harness work,
   including any post-detection diagnostic suffix.
 
-Omission faults are reported separately when the missing fact has no positive
-artifact edge. A delivered fault is not automatically counted as causal.
+Schema-v4 evaluation faults have operational rules: accidental coordinate
+shifts use a fixed offset, adversarial shifts use a precommitted route decoy,
+and `drop_once` omissions retransmit the unchanged source fact on a later
+round. A delivered fault is not automatically counted as causal.
 
 ## Replay traces
 

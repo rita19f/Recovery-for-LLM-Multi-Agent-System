@@ -33,10 +33,11 @@
       "fault": "f-water-lower-branch-swap"
     },
     {
-      "id": "restart-base-accidental-irrelevant",
-      "map": "maps/evaluation/coincident_detours.json",
+      "id": "restart-staged-accidental-delayed-exposure",
+      "map": "maps/evaluation/staged_crossing.json",
       "mode": "full-restart",
-      "fault": "f-water-upper-side-omission"
+      "fault": "f-water-exchange-delayed-shift",
+      "detection_delay_ticks": 3
     },
     {
       "id": "restart-base-adversarial-relevant",
@@ -45,10 +46,10 @@
       "fault": "a-fire-upper-branch-swap"
     },
     {
-      "id": "restart-portal-accidental-transient",
+      "id": "restart-portal-accidental-drop-once",
       "map": "maps/evaluation/three_portal_exchange.json",
       "mode": "full-restart",
-      "fault": "f-water-center-first-report-omission"
+      "fault": "f-water-center-first-message-drop"
     },
     {
       "id": "restart-portal-adversarial-relevant",
@@ -60,13 +61,13 @@
       "id": "restart-staged-accidental-relevant",
       "map": "maps/evaluation/staged_crossing.json",
       "mode": "full-restart",
-      "fault": "f-water-lower-center-to-outer"
+      "fault": "f-water-approach-center-to-outer"
     },
     {
       "id": "restart-staged-adversarial-relevant",
       "map": "maps/evaluation/staged_crossing.json",
       "mode": "full-restart",
-      "fault": "a-fire-lower-center-to-outer"
+      "fault": "a-fire-approach-center-to-outer"
     },
     {
       "id": "verify-base-accidental-relevant",

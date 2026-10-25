@@ -42,7 +42,7 @@ ASYMMETRIC_MAP_PATH = (
     PROJECT_ROOT / "maps" / "development" / "shared_asymmetric_crossing.json"
 )
 RELEVANT_FAULT = "f-water-lower-coordinate-shift"
-IRRELEVANT_FAULT = "f-water-upper-irrelevant-omission"
+IRRELEVANT_FAULT = "f-water-lower-irrelevant-omission"
 
 
 class RecoveryHarnessTest(unittest.TestCase):
@@ -119,7 +119,7 @@ class RecoveryHarnessTest(unittest.TestCase):
             "outcome_relevant",
         )
         self.assertEqual(
-            checks["f-water-upper-irrelevant-omission"]["operational_classification"],
+            checks["f-water-lower-irrelevant-omission"]["operational_classification"],
             "non_propagating",
         )
 
@@ -342,6 +342,15 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertTrue(paired["full_restart"]["success"])
         self.assertEqual(paired["full_restart"]["trap_entries"], 0)
         self.assertGreater(paired["full_restart"]["diagnostic_suffix_excluded"], 0)
+        self.assertEqual(
+            result["fault_injection_phase"], result["fault_declared_phase"]
+        )
+        self.assertEqual(result["detection"]["observed_delay_ticks"], 0)
+        self.assertGreaterEqual(
+            paired["full_restart"]["wasted_executed_actions"], 1
+        )
+        self.assertGreaterEqual(paired["full_restart"]["wasted_backend_calls"], 1)
+        self.assertIn("total_tokens", paired["full_restart"]["wasted_usage"])
 
     def test_fault_metrics_separate_exposure_plan_action_and_harm(self) -> None:
         result = run_experiment(
@@ -394,8 +403,31 @@ class RecoveryHarnessTest(unittest.TestCase):
             mode="no-recovery",
             fault_id=IRRELEVANT_FAULT,
         )
-        self.assertTrue(result["attempts"][0]["fault_injected"])
+        attempt = result["attempts"][0]
+        self.assertTrue(attempt["fault_injected"])
         self.assertTrue(result["success"])
+        self.assertEqual(
+            attempt["fault_injection_phase"], attempt["fault_declared_phase"]
+        )
+        omitted_fact_id = next(
+            artifact["artifact_id"]
+            for artifact in attempt["artifacts"]
+            if artifact.get("artifact_type") == "sensor_fact"
+            and artifact.get("cell") == [5, 1]
+        )
+        transmissions = [
+            artifact
+            for artifact in attempt["artifacts"]
+            if artifact.get("artifact_type") == "message"
+            and omitted_fact_id in artifact.get("source_ids", [])
+        ]
+        self.assertGreaterEqual(len(transmissions), 2)
+        self.assertEqual(transmissions[0]["content"]["message_facts"], [])
+        self.assertEqual(
+            transmissions[1]["content"]["message_facts"][0]["source_fact_id"],
+            omitted_fact_id,
+        )
+        self.assertEqual(attempt["communication_state"]["P2"]["pending"], 0)
 
     def test_step_dry_run_records_every_decision(self) -> None:
         backend = DryRunBackend()

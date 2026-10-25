@@ -15,18 +15,18 @@ from recovery_harness import run_scheduler_preflight, validate_map  # noqa: E402
 EXPECTED_CLASSIFICATIONS = {
     "coincident_detours.json": {
         "f-water-lower-branch-swap": "outcome_relevant",
-        "f-water-upper-side-omission": "exposed_without_relevant_plan",
+        "f-water-upper-side-drop-once": "non_propagating",
         "a-fire-upper-branch-swap": "outcome_relevant",
     },
     "three_portal_exchange.json": {
-        "f-water-center-first-report-omission": "exposed_without_relevant_plan",
+        "f-water-center-first-message-drop": "exposed_without_relevant_plan",
         "a-fire-center-relocated-right": "outcome_relevant",
     },
     "staged_crossing.json": {
-        "f-water-lower-center-to-outer": "outcome_relevant",
-        "f-water-upper-delayed-shift": "exposed_without_relevant_plan",
-        "a-fire-lower-center-to-outer": "outcome_relevant",
-        "a-fire-upper-delayed-shift": "exposed_without_relevant_plan",
+        "f-water-approach-center-to-outer": "outcome_relevant",
+        "f-water-exchange-delayed-shift": "exposed_without_relevant_plan",
+        "a-fire-approach-center-to-outer": "outcome_relevant",
+        "a-fire-exchange-delayed-shift": "exposed_without_relevant_plan",
     },
 }
 
@@ -46,11 +46,25 @@ class EvaluationMapTest(unittest.TestCase):
                 )
                 self.assertTrue(preflight["passed"])
                 self.assertTrue(preflight["clean_success"])
+                self.assertTrue(
+                    all(item["phase_matches"] for item in preflight["fault_checks"])
+                )
+                self.assertTrue(
+                    all(item["actual_tick"] is not None for item in preflight["fault_checks"])
+                )
                 observed = {
                     item["fault_id"]: item["operational_classification"]
                     for item in preflight["fault_checks"]
                 }
                 self.assertEqual(observed, expected)
+                for fault in data["faults"]:
+                    rule_type = fault["selection_rule"]["type"]
+                    if fault["kind"] == "omission":
+                        self.assertEqual(rule_type, "drop_once")
+                    elif fault["class"] == "accidental":
+                        self.assertEqual(rule_type, "fixed_offset")
+                    else:
+                        self.assertEqual(rule_type, "route_decoy")
 
     def test_base_map_has_coincident_start_and_goal(self) -> None:
         path = PROJECT_ROOT / "maps" / "evaluation" / "coincident_detours.json"

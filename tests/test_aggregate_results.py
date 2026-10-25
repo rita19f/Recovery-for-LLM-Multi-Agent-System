@@ -17,6 +17,7 @@ from aggregate_results import (  # noqa: E402
     collect_rows,
     condition_rows,
     discover_batch_summaries,
+    paired_condition_rows,
 )
 
 
@@ -139,6 +140,7 @@ class AggregateResultsTest(unittest.TestCase):
                 "run_level.csv",
                 "condition_summary.csv",
                 "paired_recovery.csv",
+                "paired_condition_summary.csv",
                 "failure_summary.csv",
                 "phase1_summary.json",
             ):
@@ -157,6 +159,49 @@ class AggregateResultsTest(unittest.TestCase):
             path.write_text("{}")
             with self.assertRaises(ValueError):
                 discover_batch_summaries([path])
+
+    def test_fault_rates_name_both_denominators(self) -> None:
+        base = {
+            "backend": "llm",
+            "model": "test-model",
+            "map_id": "map",
+            "mode": "full-restart",
+            "fault_id": "fault",
+            "fault_class": "accidental",
+            "planning_granularity": "chunk",
+            "chunk_size": 3,
+            "detection_delay_ticks": 0,
+        }
+        rows = [
+            {**base, "run_status": "ok", "fault_injected": True},
+            {**base, "run_status": "error", "fault_injected": None},
+        ]
+        summary = condition_rows(rows)[0]
+        self.assertEqual(summary["fault_injected_rate_completed"], 1.0)
+        self.assertEqual(summary["fault_injected_rate_all_runs"], 0.5)
+        self.assertNotIn("fault_injected_rate", summary)
+
+    def test_paired_condition_summary_aggregates_repetitions(self) -> None:
+        base = {
+            "backend": "llm",
+            "model": "test-model",
+            "map_id": "map",
+            "fault_id": "fault",
+            "fault_class": "accidental",
+            "planning_granularity": "chunk",
+            "chunk_size": 3,
+            "detection_delay_ticks": 0,
+            "no_recovery_success": False,
+            "full_restart_success": True,
+            "delta_total_tokens": 20,
+            "full_restart_wasted_total_tokens": 10,
+        }
+        summary = paired_condition_rows([base, {**base, "delta_total_tokens": 40}])[0]
+        self.assertEqual(summary["n_pairs"], 2)
+        self.assertEqual(summary["no_recovery_success_rate"], 0.0)
+        self.assertEqual(summary["full_restart_success_rate"], 1.0)
+        self.assertEqual(summary["delta_total_tokens_mean"], 30.0)
+        self.assertEqual(summary["full_restart_wasted_total_tokens_mean"], 10.0)
 
 
 if __name__ == "__main__":

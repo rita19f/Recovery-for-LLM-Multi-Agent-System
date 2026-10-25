@@ -16,5 +16,6 @@ results/summaries/*
 !results/summaries/run_level.csv
 !results/summaries/condition_summary.csv
 !results/summaries/paired_recovery.csv
+!results/summaries/paired_condition_summary.csv
 !results/summaries/failure_summary.csv
 !results/summaries/phase1_summary.json

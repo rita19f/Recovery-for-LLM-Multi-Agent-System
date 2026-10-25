@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "id": "coincident-detours-eval-v1",
   "description": "Held-out base case with coincident starts and goals, two short detours, and complementary hazard sensing.",
   "world_model": "shared",
@@ -15,14 +15,14 @@
     "###.###"
   ],
   "hazards": {
-    "fire": [[4, 2]],
-    "water": [[2, 4], [1, 3]]
+    "fire": [[2, 2]],
+    "water": [[2, 4], [5, 1]]
   },
   "agents": {
     "P1": {"sensor": "fire", "start": [3, 6], "goal": [3, 0]},
     "P2": {"sensor": "water", "start": [3, 6], "goal": [3, 0]}
   },
-  "observation_radius": 2,
+  "observation_radius": 1,
   "message_fact_limit": 2,
   "step_limit": 28,
   "collision_policy": "non_blocking",
@@ -60,19 +60,20 @@
       "kind": "coordinate_shift",
       "hazard": "water",
       "true_cell": [2, 4],
-      "faulty_cell": [4, 4],
+      "selection_rule": {"type": "fixed_offset", "delta": [2, 0]},
       "expected_effect": "P1 may be directed onto the true water cell on the left detour."
     },
     {
-      "id": "f-water-upper-side-omission",
+      "id": "f-water-upper-side-drop-once",
       "class": "accidental",
       "phase": "upper-detour",
       "source_agent": "P2",
       "transmission_occurrence": 1,
       "kind": "omission",
       "hazard": "water",
-      "true_cell": [1, 3],
-      "expected_effect": "The omitted side-cell report should not change either valid upper detour."
+      "true_cell": [5, 1],
+      "selection_rule": {"type": "drop_once"},
+      "expected_effect": "The side-cell report is dropped once and retransmitted; it should not change either valid upper detour."
     },
     {
       "id": "a-fire-upper-branch-swap",
@@ -82,9 +83,9 @@
       "transmission_occurrence": 1,
       "kind": "coordinate_shift",
       "hazard": "fire",
-      "true_cell": [4, 2],
-      "faulty_cell": [2, 2],
-      "expected_effect": "A malicious fire report may steer P2 onto the true fire cell on the right detour."
+      "true_cell": [2, 2],
+      "selection_rule": {"type": "route_decoy", "cell": [4, 2]},
+      "expected_effect": "A malicious fire report may steer P2 onto the true fire cell on the left detour."
     }
   ]
 }

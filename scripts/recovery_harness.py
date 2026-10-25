@@ -316,10 +316,10 @@ def in_bounds(data: dict[str, Any], cell: tuple[int, int]) -> bool:
 
 def validate_map(data: dict[str, Any]) -> dict[str, Any]:
     schema_version = data.get("schema_version")
-    if schema_version != 3:
-        raise MapValidationError("environment requires schema_version 3")
+    if schema_version not in {3, 4}:
+        raise MapValidationError("environment requires schema_version 3 or 4")
     if data.get("world_model") != "shared":
-        raise MapValidationError("schema_version 3 requires world_model='shared'")
+        raise MapValidationError("shared-world schemas require world_model='shared'")
     width = data["dimensions"]["width"]
     height = data["dimensions"]["height"]
     rows = data["public_rows"]
@@ -476,11 +476,44 @@ def validate_map(data: dict[str, Any]) -> dict[str, Any]:
                 f"fault {fault['id']} true_cell is not a {fault['hazard']} trap"
             )
         if fault["kind"] == "coordinate_shift":
-            faulty_cell = as_cell(fault["faulty_cell"])
+            faulty_cell = resolve_faulty_cell(fault)
             if not in_bounds(data, faulty_cell):
                 raise MapValidationError(f"fault {fault['id']} faulty_cell out of bounds")
+            if faulty_cell == true_cell:
+                raise MapValidationError(
+                    f"fault {fault['id']} coordinate shift must change the cell"
+                )
+            if data.get("schema_version", 0) >= 4 and tile_at(data, faulty_cell) == "#":
+                raise MapValidationError(
+                    f"fault {fault['id']} selection rule resolves to a public wall"
+                )
+            rule = fault.get("selection_rule")
+            if data.get("schema_version", 0) >= 4 and not isinstance(rule, dict):
+                raise MapValidationError(
+                    f"fault {fault['id']} requires a selection_rule in schema v4"
+                )
+            if isinstance(rule, dict):
+                rule_type = rule.get("type")
+                expected_rule = (
+                    "fixed_offset"
+                    if fault.get("class") == "accidental"
+                    else "route_decoy"
+                    if fault.get("class") == "adversarial"
+                    else None
+                )
+                if expected_rule is not None and rule_type != expected_rule:
+                    raise MapValidationError(
+                        f"fault {fault['id']} class {fault.get('class')} requires "
+                        f"selection_rule.type={expected_rule}"
+                    )
         elif fault["kind"] != "omission":
             raise MapValidationError(f"unsupported environment fault kind: {fault['kind']}")
+        elif data.get("schema_version", 0) >= 4:
+            rule = fault.get("selection_rule")
+            if not isinstance(rule, dict) or rule.get("type") != "drop_once":
+                raise MapValidationError(
+                    f"fault {fault['id']} omission requires selection_rule.type=drop_once"
+                )
 
     return {
         "map_id": data["id"],
@@ -1607,6 +1640,32 @@ def validate_chunk_plan_output(
     }
 
 
+def resolve_faulty_cell(fault: dict[str, Any]) -> tuple[int, int]:
+    """Resolve a coordinate fault from its precommitted operational rule."""
+    rule = fault.get("selection_rule")
+    if isinstance(rule, dict):
+        rule_type = rule.get("type")
+        if rule_type == "fixed_offset":
+            delta = rule.get("delta")
+            if (
+                not isinstance(delta, list)
+                or len(delta) != 2
+                or any(not isinstance(value, int) for value in delta)
+            ):
+                raise MapValidationError(
+                    f"fault {fault.get('id')} fixed_offset requires integer delta [dx, dy]"
+                )
+            true_cell = as_cell(fault["true_cell"])
+            return true_cell[0] + delta[0], true_cell[1] + delta[1]
+        if rule_type == "route_decoy":
+            return as_cell(rule.get("cell"))
+        raise MapValidationError(
+            f"fault {fault.get('id')} has unsupported selection rule: {rule_type}"
+        )
+    # Backward compatibility for development maps created before schema v4.
+    return as_cell(fault["faulty_cell"])
+
+
 def inject_fault(
     message: dict[str, Any], fault: dict[str, Any]
 ) -> tuple[dict[str, Any], bool]:
@@ -1621,7 +1680,7 @@ def inject_fault(
                 continue
             if fault["kind"] == "coordinate_shift":
                 item = dict(item)
-                item["cell"] = list(as_cell(fault["faulty_cell"]))
+                item["cell"] = list(resolve_faulty_cell(fault))
         new_facts.append(item)
     updated["message_facts"] = new_facts
     if matched:
@@ -2603,6 +2662,7 @@ def run_attempt(
     fault_injected = False
     fault_message_id: str | None = None
     fault_injected_tick: int | None = None
+    fault_injected_phase: str | None = None
     fault_delivered_to_recipient = False
     fault_exposed_to_planner = False
     fault_consumed = False
@@ -2639,6 +2699,13 @@ def run_attempt(
             "phase": phase_id,
             "tick": tick,
             "reason": reason,
+            "injection_phase": fault_injected_phase,
+            "injection_tick": fault_injected_tick,
+            "observed_delay_ticks": (
+                None
+                if fault_injected_tick is None
+                else max(0, tick - fault_injected_tick)
+            ),
             "backend_call_count": len(backend.call_records) - before_calls,
             "artifact_count": len(trace.artifacts),
             "event_count": len(trace.events),
@@ -2717,6 +2784,7 @@ def run_attempt(
 
     def communicate_pending(phase_id: str, tick: int) -> None:
         nonlocal fault_injected, fault_message_id, fault_injected_tick
+        nonlocal fault_injected_phase
         nonlocal fault_delivered_to_recipient
         nonlocal verification_checks, verification_rejections
         for agent in AGENTS:
@@ -2745,7 +2813,12 @@ def run_attempt(
 
             delivered = normalized
             injected_here = False
-            if fault is not None and not fault_injected and fault["source_agent"] == agent:
+            if (
+                fault is not None
+                and not fault_injected
+                and fault["source_agent"] == agent
+                and fault["phase"] == phase_id
+            ):
                 matching_items = [
                     item
                     for item in normalized["message_facts"]
@@ -2772,16 +2845,10 @@ def run_attempt(
                 controlled_fault_id=fault["id"] if injected_here and fault else None,
                 lifecycle_status="faulty" if injected_here else "valid",
             )
-            pending_fact_ids[agent] = [
-                fact_id
-                for fact_id in pending_fact_ids[agent]
-                if fact_id not in selected_source_ids
-            ]
-            delivered_fact_ids[agent].update(selected_source_ids)
-
             if injected_here:
                 fault_message_id = message_id
                 fault_injected_tick = tick
+                fault_injected_phase = phase_id
                 trace.event(
                     "fault_injected",
                     fault_id=fault["id"],
@@ -2790,6 +2857,7 @@ def run_attempt(
                     actual_phase=phase_id,
                     tick=tick,
                     transmission_occurrence=fault.get("transmission_occurrence", 1),
+                    selection_rule=fault.get("selection_rule"),
                 )
 
             recipient = PARTNER[agent]
@@ -2851,6 +2919,17 @@ def run_attempt(
                         tick=tick,
                     )
 
+            effective_source_ids = {
+                item["source_fact_id"]
+                for item in effective_delivery["message_facts"]
+            }
+            pending_fact_ids[agent] = [
+                fact_id
+                for fact_id in pending_fact_ids[agent]
+                if fact_id not in effective_source_ids
+            ]
+            delivered_fact_ids[agent].update(effective_source_ids)
+
             if injected_here and effective_message_id == message_id:
                 fault_delivered_to_recipient = True
             delivered_memory_ids = []
@@ -2881,7 +2960,7 @@ def run_attempt(
                 recipient=recipient,
                 phase=phase_id,
                 tick=tick,
-                source_fact_ids=selected_source_ids,
+                source_fact_ids=sorted(effective_source_ids),
                 memory_artifact_ids=delivered_memory_ids,
             )
 
@@ -2958,7 +3037,12 @@ def run_attempt(
         }
 
     def record_fault_plan(
-        *, agent: str, plan_artifact_id: str, labels: dict[str, Any]
+        *,
+        agent: str,
+        phase_id: str,
+        tick: int,
+        plan_artifact_id: str,
+        labels: dict[str, Any],
     ) -> None:
         nonlocal fault_consumed, fault_explicitly_consumed
         nonlocal fault_structurally_consumed, fault_exposed_to_planner
@@ -2967,6 +3051,8 @@ def run_attempt(
             fault_exposed_to_planner = True
             evaluation = {
                 "agent": agent,
+                "phase": phase_id,
+                "tick": tick,
                 "plan_artifact_id": plan_artifact_id,
                 "declared": labels["fault_declared_dependency"],
                 "structured": labels["fault_structured_dependency"],
@@ -3217,6 +3303,8 @@ def run_attempt(
                         )
                         record_fault_plan(
                             agent=agent,
+                            phase_id=phase_id,
+                            tick=global_tick,
                             plan_artifact_id=plan_id,
                             labels=fault_labels,
                         )
@@ -3270,6 +3358,8 @@ def run_attempt(
                         )
                         record_fault_plan(
                             agent=agent,
+                            phase_id=phase_id,
+                            tick=global_tick,
                             plan_artifact_id=plan_id,
                             labels=fault_labels,
                         )
@@ -3342,6 +3432,8 @@ def run_attempt(
                             }
                         record_fault_plan(
                             agent=agent,
+                            phase_id=phase_id,
+                            tick=global_tick,
                             plan_artifact_id=plan_id,
                             labels=fault_labels,
                         )
@@ -3386,6 +3478,8 @@ def run_attempt(
                         )
                         record_fault_plan(
                             agent=agent,
+                            phase_id=phase_id,
+                            tick=global_tick,
                             plan_artifact_id=plan_id,
                             labels=fault_labels,
                         )
@@ -3664,6 +3758,10 @@ def run_attempt(
         },
         "fault_id": None if fault is None else fault["id"],
         "fault_class": None if fault is None else fault.get("class", "unspecified"),
+        "fault_selection_rule": None if fault is None else fault.get("selection_rule"),
+        "fault_declared_phase": None if fault is None else fault.get("phase"),
+        "fault_injection_phase": fault_injected_phase,
+        "fault_injection_tick": fault_injected_tick,
         "fault_injected": fault_injected,
         "fault_delivered_to_recipient": fault_delivered_to_recipient,
         "fault_exposed_to_planner": fault_exposed_to_planner,
@@ -3676,6 +3774,31 @@ def run_attempt(
             fault_executed_relevant_action
         ),
         "fault_caused_failure": fault_caused_failure,
+        "fault_affected_stages": sorted(
+            {
+                evaluation["phase"]
+                for evaluation in plan_dependency_evaluations
+                if evaluation["declared"]
+                or evaluation["structured"]
+                or evaluation["counterfactually_relevant"]
+            }
+        ),
+        "affected_stage_count": len(
+            {
+                evaluation["phase"]
+                for evaluation in plan_dependency_evaluations
+                if evaluation["declared"]
+                or evaluation["structured"]
+                or evaluation["counterfactually_relevant"]
+            }
+        ),
+        # The public action validator never executes a rejected move.  We still
+        # report attempted known-hazard moves separately.
+        "unauthorized_actions": 0,
+        "blocked_unsafe_action_attempts": sum(
+            event["event_type"] == "known_hazard_selected"
+            for event in trace.events
+        ),
         "fault_plan_evaluations": plan_dependency_evaluations,
         "dependency_quality": {
             method: dependency_confusion(method)
@@ -3827,6 +3950,14 @@ def run_experiment(
                 "diagnostic_suffix_excluded": (
                     len(first_records) - len(prefix_records)
                 ),
+                "wasted_executed_actions": int(
+                    detection_snapshot.get("executed_action_count", 0)
+                ),
+                "wasted_backend_calls": len(prefix_records),
+                "wasted_llm_calls": sum(
+                    record.get("backend") == "llm" for record in prefix_records
+                ),
+                "wasted_usage": sum_usage(prefix_records),
                 "accounting_note": (
                     "shared faulty prefix through detection plus clean restart"
                 ),
@@ -3837,6 +3968,10 @@ def run_experiment(
         "mode": mode,
         "fault_id": fault_id,
         "fault_class": first["fault_class"],
+        "fault_selection_rule": first["fault_selection_rule"],
+        "fault_declared_phase": first["fault_declared_phase"],
+        "fault_injection_phase": first["fault_injection_phase"],
+        "fault_injection_tick": first["fault_injection_tick"],
         "planning_granularity": planning_granularity,
         "chunk_size": chunk_size,
         "detection_delay_ticks": detection_delay_ticks,
@@ -3862,8 +3997,12 @@ def run_experiment(
                 "fault_counterfactually_relevant_plan",
                 "fault_counterfactually_relevant_executed",
                 "fault_caused_failure",
+                "affected_stage_count",
+                "unauthorized_actions",
+                "blocked_unsafe_action_attempts",
             )
         },
+        "fault_affected_stages": first["fault_affected_stages"],
         "dependency_quality": first["dependency_quality"],
         "verification_checks": sum(
             attempt["verification_checks"] for attempt in attempts
@@ -3923,6 +4062,12 @@ def run_scheduler_preflight(
             {
                 "fault_id": fault["id"],
                 "fault_class": fault.get("class", "unspecified"),
+                "declared_phase": fault.get("phase"),
+                "actual_phase": attempt["fault_injection_phase"],
+                "actual_tick": attempt["fault_injection_tick"],
+                "phase_matches": (
+                    attempt["fault_injection_phase"] == fault.get("phase")
+                ),
                 "fault_injected": attempt["fault_injected"],
                 "fault_consumed": attempt["fault_consumed"],
                 "fault_delivered_to_recipient": attempt[
@@ -3965,7 +4110,10 @@ def run_scheduler_preflight(
         "clean_trap_entries": clean["trap_entries"],
         "fault_checks": fault_checks,
         "passed": clean["final_success"]
-        and all(item["fault_injected"] for item in fault_checks),
+        and all(
+            item["fault_injected"] and item["phase_matches"]
+            for item in fault_checks
+        ),
     }
 
 

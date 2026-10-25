@@ -70,9 +70,9 @@
       "expected_effect": "P1 may choose the left branch and encounter the true water trap; P2's own navigation remains unaffected."
     },
     {
-      "id": "f-water-upper-irrelevant-omission",
+      "id": "f-water-lower-irrelevant-omission",
       "class": "accidental",
-      "phase": "upper-junction",
+      "phase": "lower-junction",
       "source_agent": "P2",
       "transmission_occurrence": 1,
       "kind": "omission",

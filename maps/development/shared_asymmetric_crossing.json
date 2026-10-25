@@ -78,9 +78,9 @@
       "expected_effect": "P1 may take the shorter interior route and trigger the true water trap while P2 remains unaffected."
     },
     {
-      "id": "f-fire-upper-coordinate-shift",
+      "id": "f-fire-lower-coordinate-shift",
       "class": "accidental",
-      "phase": "upper-crossing",
+      "phase": "lower-divergence",
       "source_agent": "P1",
       "transmission_occurrence": 1,
       "kind": "coordinate_shift",
@@ -90,9 +90,9 @@
       "expected_effect": "P2 may take the middle crossing route and trigger the true fire trap while P1 remains unaffected."
     },
     {
-      "id": "f-water-upper-irrelevant-omission",
+      "id": "f-water-lower-irrelevant-omission",
       "class": "accidental",
-      "phase": "upper-crossing",
+      "phase": "lower-divergence",
       "source_agent": "P2",
       "transmission_occurrence": 1,
       "kind": "omission",
@@ -101,9 +101,9 @@
       "expected_effect": "The omitted side-corridor fact should not invalidate either selected upper route."
     },
     {
-      "id": "a-fire-upper-targeted-coordinate-shift",
+      "id": "a-fire-lower-targeted-coordinate-shift",
       "class": "adversarial",
-      "phase": "upper-crossing",
+      "phase": "lower-divergence",
       "source_agent": "P1",
       "transmission_occurrence": 1,
       "kind": "coordinate_shift",

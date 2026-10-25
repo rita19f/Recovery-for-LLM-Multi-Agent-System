@@ -111,7 +111,8 @@ def main() -> int:
         default=None,
         help=(
             "controlled detection delay after fault injection; 0 detects before "
-            "the next plan, N waits N scheduler ticks, and omission detects at outcome"
+            "the next plan, N waits N scheduler ticks, and an episode that ends "
+            "first records outcome-time detection"
         ),
     )
     parser.add_argument("--output", type=Path)

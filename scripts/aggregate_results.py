@@ -30,6 +30,13 @@ RUN_FIELDS = [
     "mode",
     "fault_id",
     "fault_class",
+    "fault_selection_rule_type",
+    "fault_declared_phase",
+    "fault_injection_phase",
+    "fault_injection_tick",
+    "detection_phase",
+    "detection_tick",
+    "observed_detection_delay_ticks",
     "planning_granularity",
     "chunk_size",
     "detection_delay_ticks",
@@ -60,6 +67,14 @@ RUN_FIELDS = [
     "fault_counterfactually_relevant_plan",
     "fault_counterfactually_relevant_executed",
     "fault_caused_failure",
+    "affected_stage_count",
+    "fault_affected_stages",
+    "unauthorized_actions",
+    "blocked_unsafe_action_attempts",
+    "wasted_executed_actions",
+    "wasted_backend_calls",
+    "wasted_llm_calls",
+    "wasted_total_tokens",
     "declared_tp",
     "declared_fp",
     "declared_fn",
@@ -114,6 +129,13 @@ METRIC_FIELDS = [
     "dependency_tracking_ms",
     "verification_checks",
     "verification_rejections",
+    "affected_stage_count",
+    "unauthorized_actions",
+    "blocked_unsafe_action_attempts",
+    "wasted_executed_actions",
+    "wasted_backend_calls",
+    "wasted_llm_calls",
+    "wasted_total_tokens",
 ]
 
 PAIR_FIELDS = [
@@ -127,6 +149,12 @@ PAIR_FIELDS = [
     "planning_granularity",
     "chunk_size",
     "detection_delay_ticks",
+    "fault_declared_phase",
+    "fault_injection_phase",
+    "fault_injection_tick",
+    "detection_phase",
+    "detection_tick",
+    "observed_detection_delay_ticks",
     "shared_faulty_trajectory",
     "no_recovery_success",
     "no_recovery_trap_entries",
@@ -140,6 +168,43 @@ PAIR_FIELDS = [
     "full_restart_llm_calls",
     "full_restart_total_tokens",
     "full_restart_latency_ms",
+    "full_restart_wasted_executed_actions",
+    "full_restart_wasted_backend_calls",
+    "full_restart_wasted_llm_calls",
+    "full_restart_wasted_total_tokens",
+    "delta_trap_entries",
+    "delta_backend_calls",
+    "delta_llm_calls",
+    "delta_total_tokens",
+    "delta_latency_ms",
+]
+
+PAIR_GROUP_FIELDS = [
+    "backend",
+    "model",
+    "map_id",
+    "fault_id",
+    "fault_class",
+    "planning_granularity",
+    "chunk_size",
+    "detection_delay_ticks",
+]
+
+PAIR_METRIC_FIELDS = [
+    "no_recovery_trap_entries",
+    "no_recovery_backend_calls",
+    "no_recovery_llm_calls",
+    "no_recovery_total_tokens",
+    "no_recovery_latency_ms",
+    "full_restart_trap_entries",
+    "full_restart_backend_calls",
+    "full_restart_llm_calls",
+    "full_restart_total_tokens",
+    "full_restart_latency_ms",
+    "full_restart_wasted_executed_actions",
+    "full_restart_wasted_backend_calls",
+    "full_restart_wasted_llm_calls",
+    "full_restart_wasted_total_tokens",
     "delta_trap_entries",
     "delta_backend_calls",
     "delta_llm_calls",
@@ -263,6 +328,17 @@ def outcome_to_row(
     fault_metrics = (
         episode.get("fault_metrics", {}) if isinstance(episode, dict) else {}
     )
+    detection = episode.get("detection", {}) if isinstance(episode, dict) else {}
+    if not isinstance(detection, dict):
+        detection = {}
+    paired_baselines = (
+        episode.get("paired_baselines") if isinstance(episode, dict) else None
+    )
+    restart_pair = (
+        paired_baselines.get("full_restart", {})
+        if isinstance(paired_baselines, dict)
+        else {}
+    )
     row: dict[str, Any] = {
         "batch_name": batch.get("batch_name"),
         "run_id": outcome.get("run_id"),
@@ -274,6 +350,15 @@ def outcome_to_row(
         "mode": episode.get("mode", condition.get("mode")),
         "fault_id": episode.get("fault_id", condition.get("fault_id")),
         "fault_class": episode.get("fault_class", condition.get("fault_class")),
+        "fault_selection_rule_type": nested(
+            episode, "fault_selection_rule", "type"
+        ),
+        "fault_declared_phase": episode.get("fault_declared_phase"),
+        "fault_injection_phase": episode.get("fault_injection_phase"),
+        "fault_injection_tick": episode.get("fault_injection_tick"),
+        "detection_phase": detection.get("phase"),
+        "detection_tick": detection.get("tick"),
+        "observed_detection_delay_ticks": detection.get("observed_delay_ticks"),
         "planning_granularity": episode.get(
             "planning_granularity", condition.get("planning_granularity")
         ),
@@ -300,6 +385,18 @@ def outcome_to_row(
         "recovery_ms": nested(latency, "recovery"),
         "llm_ms": nested(latency, "llm"),
         "dependency_tracking_ms": nested(latency, "dependency_tracking"),
+        "affected_stage_count": fault_metrics.get("affected_stage_count"),
+        "fault_affected_stages": json.dumps(
+            episode.get("fault_affected_stages", []), separators=(",", ":")
+        ),
+        "unauthorized_actions": fault_metrics.get("unauthorized_actions"),
+        "blocked_unsafe_action_attempts": fault_metrics.get(
+            "blocked_unsafe_action_attempts"
+        ),
+        "wasted_executed_actions": restart_pair.get("wasted_executed_actions"),
+        "wasted_backend_calls": restart_pair.get("wasted_backend_calls"),
+        "wasted_llm_calls": restart_pair.get("wasted_llm_calls"),
+        "wasted_total_tokens": nested(restart_pair, "wasted_usage", "total_tokens"),
         "verification_checks": episode.get("verification_checks"),
         "verification_rejections": episode.get("verification_rejections"),
         "error_category": error_category(status, error_type, error_text),
@@ -315,7 +412,7 @@ def outcome_to_row(
     for key in FAULT_BOOLEAN_FIELDS:
         row[key] = fault_metrics.get(key) if isinstance(fault_metrics, dict) else None
     row.update(dependency_columns(episode))
-    return row, episode.get("paired_baselines") if status == "ok" else None
+    return row, paired_baselines if status == "ok" else None
 
 
 def collect_rows(
@@ -415,8 +512,21 @@ def condition_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 ),
             }
         )
+        fault_condition = summary.get("fault_id") is not None
         for field in FAULT_BOOLEAN_FIELDS:
-            summary[f"{field}_rate"] = rate(item.get(field) for item in group)
+            summary[f"{field}_rate_completed"] = rate(
+                item.get(field)
+                for item in group
+                if item["run_status"] == "ok"
+            )
+            summary[f"{field}_rate_all_runs"] = (
+                None
+                if not fault_condition
+                else round(
+                    sum(item.get(field) is True for item in group) / len(group),
+                    4,
+                )
+            )
         for field in METRIC_FIELDS:
             mean, std = mean_std(item.get(field) for item in group)
             summary[f"{field}_mean"] = mean
@@ -465,6 +575,12 @@ def make_paired_row(row: dict[str, Any], paired: dict[str, Any]) -> dict[str, An
             "planning_granularity",
             "chunk_size",
             "detection_delay_ticks",
+            "fault_declared_phase",
+            "fault_injection_phase",
+            "fault_injection_tick",
+            "detection_phase",
+            "detection_tick",
+            "observed_detection_delay_ticks",
         )
     }
     output["shared_faulty_trajectory"] = paired.get("shared_faulty_trajectory")
@@ -475,10 +591,47 @@ def make_paired_row(row: dict[str, Any], paired: dict[str, Any]) -> dict[str, An
         output[f"{prefix}_llm_calls"] = values.get("llm_calls")
         output[f"{prefix}_total_tokens"] = nested(values, "usage", "total_tokens")
         output[f"{prefix}_latency_ms"] = values.get("latency_ms")
+    output["full_restart_wasted_executed_actions"] = restart.get(
+        "wasted_executed_actions"
+    )
+    output["full_restart_wasted_backend_calls"] = restart.get(
+        "wasted_backend_calls"
+    )
+    output["full_restart_wasted_llm_calls"] = restart.get("wasted_llm_calls")
+    output["full_restart_wasted_total_tokens"] = nested(
+        restart, "wasted_usage", "total_tokens"
+    )
     for metric in ("trap_entries", "backend_calls", "llm_calls", "total_tokens", "latency_ms"):
         left = numeric(output.get(f"full_restart_{metric}"))
         right = numeric(output.get(f"no_recovery_{metric}"))
         output[f"delta_{metric}"] = None if left is None or right is None else round(left - right, 4)
+    return output
+
+
+def paired_condition_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate paired no-recovery/full-restart outcomes by condition."""
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[tuple(row.get(field) for field in PAIR_GROUP_FIELDS)].append(row)
+    output: list[dict[str, Any]] = []
+    for key, group in sorted(grouped.items(), key=lambda item: repr(item[0])):
+        summary = dict(zip(PAIR_GROUP_FIELDS, key))
+        summary.update(
+            {
+                "n_pairs": len(group),
+                "no_recovery_success_rate": rate(
+                    item.get("no_recovery_success") for item in group
+                ),
+                "full_restart_success_rate": rate(
+                    item.get("full_restart_success") for item in group
+                ),
+            }
+        )
+        for field in PAIR_METRIC_FIELDS:
+            mean, std = mean_std(item.get(field) for item in group)
+            summary[f"{field}_mean"] = mean
+            summary[f"{field}_std"] = std
+        output.append(summary)
     return output
 
 
@@ -529,12 +682,14 @@ def main() -> int:
     batch_paths = discover_batch_summaries(args.inputs)
     rows, paired = collect_rows(batch_paths)
     conditions = condition_rows(rows)
+    paired_conditions = paired_condition_rows(paired)
     failures = failure_rows(rows)
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     write_csv(output_dir / "run_level.csv", rows, RUN_FIELDS)
     write_csv(output_dir / "condition_summary.csv", conditions)
     write_csv(output_dir / "paired_recovery.csv", paired, PAIR_FIELDS)
+    write_csv(output_dir / "paired_condition_summary.csv", paired_conditions)
     write_csv(output_dir / "failure_summary.csv", failures)
 
     status_counts = Counter(row["run_status"] for row in rows)
@@ -573,10 +728,12 @@ def main() -> int:
         ),
         "condition_count": len(conditions),
         "paired_recovery_count": len(paired),
+        "paired_condition_count": len(paired_conditions),
         "outputs": {
             "run_level": "run_level.csv",
             "condition_summary": "condition_summary.csv",
             "paired_recovery": "paired_recovery.csv",
+            "paired_condition_summary": "paired_condition_summary.csv",
             "failure_summary": "failure_summary.csv",
         },
     }

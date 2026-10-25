@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "id": "staged-crossing-eval-v1",
   "description": "Held-out large case with two sequential crossings, delayed hazard discovery, and asymmetric final goals.",
   "world_model": "shared",
@@ -24,25 +24,39 @@
     "P1": {"sensor": "fire", "start": [3, 8], "goal": [3, 0]},
     "P2": {"sensor": "water", "start": [7, 8], "goal": [7, 0]}
   },
-  "observation_radius": 4,
+  "observation_radius": 3,
   "message_fact_limit": 2,
   "step_limit": 70,
   "collision_policy": "non_blocking",
   "prelude_actions": {"P1": ["UP"], "P2": ["UP"]},
   "phases": [
     {
-      "id": "lower-crossing",
+      "id": "lower-approach",
       "start": {"P1": [3, 7], "P2": [7, 7]},
-      "target": {"P1": [9, 5], "P2": [1, 5]},
-      "max_actions": {"P1": 18, "P2": 18},
+      "target": {"P1": [3, 5], "P2": [7, 5]},
+      "max_actions": {"P1": 10, "P2": 10},
       "reference_routes": {
         "P1": [
-          ["RIGHT", "RIGHT", "UP", "UP", "RIGHT", "RIGHT", "RIGHT", "RIGHT"],
-          ["LEFT", "LEFT", "UP", "UP", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT"]
+          ["RIGHT", "RIGHT", "UP", "UP", "LEFT", "LEFT"],
+          ["LEFT", "LEFT", "UP", "UP", "RIGHT", "RIGHT"]
         ],
         "P2": [
-          ["LEFT", "LEFT", "UP", "UP", "LEFT", "LEFT", "LEFT", "LEFT"],
-          ["RIGHT", "RIGHT", "UP", "UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT"]
+          ["LEFT", "LEFT", "UP", "UP", "RIGHT", "RIGHT"],
+          ["RIGHT", "RIGHT", "UP", "UP", "LEFT", "LEFT"]
+        ]
+      }
+    },
+    {
+      "id": "side-exchange",
+      "start": {"P1": [3, 5], "P2": [7, 5]},
+      "target": {"P1": [9, 5], "P2": [1, 5]},
+      "max_actions": {"P1": 8, "P2": 8},
+      "reference_routes": {
+        "P1": [
+          ["RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT"]
+        ],
+        "P2": [
+          ["LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT"]
         ]
       }
     },
@@ -66,51 +80,51 @@
   "finale_actions": {"P1": [], "P2": []},
   "faults": [
     {
-      "id": "f-water-lower-center-to-outer",
+      "id": "f-water-approach-center-to-outer",
       "class": "accidental",
-      "phase": "lower-crossing",
+      "phase": "lower-approach",
       "source_agent": "P2",
       "transmission_occurrence": 1,
       "kind": "coordinate_shift",
       "hazard": "water",
       "true_cell": [4, 7],
-      "faulty_cell": [1, 6],
+      "selection_rule": {"type": "fixed_offset", "delta": [-3, -1]},
       "expected_effect": "P1 may prefer the center portal and trigger the relocated water hazard."
     },
     {
-      "id": "f-water-upper-delayed-shift",
+      "id": "f-water-exchange-delayed-shift",
       "class": "accidental",
-      "phase": "upper-crossing",
+      "phase": "side-exchange",
       "source_agent": "P2",
       "transmission_occurrence": 1,
       "kind": "coordinate_shift",
       "hazard": "water",
       "true_cell": [4, 2],
-      "faulty_cell": [1, 2],
+      "selection_rule": {"type": "fixed_offset", "delta": [-3, 0]},
       "expected_effect": "This late report is exposed to planning but should arrive after P1 has already committed to a safe continuation."
     },
     {
-      "id": "a-fire-lower-center-to-outer",
+      "id": "a-fire-approach-center-to-outer",
       "class": "adversarial",
-      "phase": "lower-crossing",
+      "phase": "lower-approach",
       "source_agent": "P1",
       "transmission_occurrence": 1,
       "kind": "coordinate_shift",
       "hazard": "fire",
       "true_cell": [6, 7],
-      "faulty_cell": [9, 6],
+      "selection_rule": {"type": "route_decoy", "cell": [9, 6]},
       "expected_effect": "A malicious report can push P2 away from the outer-right route and into the true center fire trap."
     },
     {
-      "id": "a-fire-upper-delayed-shift",
+      "id": "a-fire-exchange-delayed-shift",
       "class": "adversarial",
-      "phase": "upper-crossing",
+      "phase": "side-exchange",
       "source_agent": "P1",
       "transmission_occurrence": 1,
       "kind": "coordinate_shift",
       "hazard": "fire",
       "true_cell": [6, 2],
-      "faulty_cell": [9, 2],
+      "selection_rule": {"type": "route_decoy", "cell": [9, 2]},
       "expected_effect": "The late malicious report is exposed but should not alter P2's already-safe continuation."
     }
   ]

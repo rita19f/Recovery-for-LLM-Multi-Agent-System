@@ -39,9 +39,9 @@ The development batch currently covers:
 - trusted-source always verification;
 - three repetitions per condition by default.
 
-At least one delayed-detection batch should be added after immediate-detection
-runs are stable. Detection delay is a controlled experimental factor, not an
-automated detector.
+The official matrix includes both immediate detection and one three-tick
+delayed-detection condition. Detection delay is a controlled experimental
+factor, not an automated detector.
 
 ## Required measurements
 
@@ -49,16 +49,21 @@ automated detector.
 - trap entries and other unsafe actions;
 - fault injection, delivery, planner exposure, plan relevance, executed harm,
   and caused failure;
+- declared versus actual injection phase/tick and observed detection delay;
+- affected workflow stages, blocked unsafe-action attempts, and executed
+  unauthorized actions;
 - plan-level dependency TP/FP/FN/TN;
 - LLM calls and prompt/completion tokens;
 - end-to-end, LLM, recovery, and dependency-tracking latency;
-- retained work and recomputed work once selective recovery is implemented;
+- wasted prefix work for full restart, plus retained and recomputed work once
+  selective recovery is implemented;
 - all failed, malformed, null, skipped, and timed-out runs.
 
 `scripts/aggregate_results.py` converts batch summaries into the canonical
-run-level, condition-level, paired-recovery, failure, and Phase 1 overview
-files. API/program success and task success are separate metrics; errors and
-timeouts remain in the primary all-runs denominator.
+run-level, condition-level, paired-run, paired-condition, failure, and Phase 1
+overview files. API/program success and task success are separate metrics;
+errors and timeouts remain in the primary all-runs denominator. Fault funnel
+rates carry explicit `_completed` and `_all_runs` suffixes.
 
 ## Baseline interpretation
 
