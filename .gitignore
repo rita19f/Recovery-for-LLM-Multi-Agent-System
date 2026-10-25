@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+.env
+.env.*
+!.env.example
+
+# Raw API traces may contain prompts and are generated per run.
+results/runs/
+results/batches/
+
+# Commit only reviewed aggregate tables, not ad-hoc analysis outputs.
+results/summaries/*
+!results/summaries/README.md
+!results/summaries/run_level.csv
+!results/summaries/condition_summary.csv
+!results/summaries/paired_recovery.csv
+!results/summaries/failure_summary.csv
+!results/summaries/phase1_summary.json

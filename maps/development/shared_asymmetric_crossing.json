@@ -1,0 +1,116 @@
+{
+  "schema_version": 3,
+  "id": "shared-asymmetric-crossing-v1",
+  "description": "A larger shared-world development map with independent agent phases, asymmetric endpoints, crossing routes, and complementary hazard information.",
+  "world_model": "shared",
+  "dimensions": {"width": 11, "height": 9},
+  "coordinate_system": {"origin": "top-left", "cell": "[x, y]"},
+  "public_rows": [
+    "###########",
+    "#.........#",
+    "#..#####..#",
+    "#.........#",
+    "#.........#",
+    "#....#....#",
+    "#.#.....#.#",
+    "#.........#",
+    "###########"
+  ],
+  "hazards": {
+    "fire": [[4, 5], [8, 3]],
+    "water": [[2, 4], [3, 4], [6, 5]]
+  },
+  "agents": {
+    "P1": {"sensor": "fire", "start": [4, 7], "goal": [2, 1]},
+    "P2": {"sensor": "water", "start": [6, 7], "goal": [8, 1]}
+  },
+  "observation_radius": 2,
+  "message_fact_limit": 2,
+  "step_limit": 64,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {"P1": [], "P2": []},
+  "phases": [
+    {
+      "id": "lower-divergence",
+      "start": {"P1": [4, 7], "P2": [6, 7]},
+      "target": {"P1": [9, 5], "P2": [1, 5]},
+      "max_actions": {"P1": 20, "P2": 20},
+      "reference_routes": {
+        "P1": [
+          ["RIGHT", "RIGHT", "UP", "UP", "RIGHT", "RIGHT", "RIGHT"],
+          ["RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "UP", "UP"]
+        ],
+        "P2": [
+          ["LEFT", "LEFT", "UP", "UP", "LEFT", "LEFT", "LEFT"],
+          ["LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "UP", "UP"]
+        ]
+      }
+    },
+    {
+      "id": "upper-crossing",
+      "start": {"P1": [9, 5], "P2": [1, 5]},
+      "target": {"P1": [2, 1], "P2": [8, 1]},
+      "max_actions": {"P1": 28, "P2": 28},
+      "reference_routes": {
+        "P1": [
+          ["UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "UP", "UP", "UP"],
+          ["UP", "UP", "UP", "UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT"]
+        ],
+        "P2": [
+          ["UP", "UP", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "UP", "UP"],
+          ["UP", "UP", "UP", "UP", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT"]
+        ]
+      }
+    }
+  ],
+  "finale_actions": {"P1": [], "P2": []},
+  "faults": [
+    {
+      "id": "f-water-lower-coordinate-shift",
+      "class": "accidental",
+      "phase": "lower-divergence",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "water",
+      "true_cell": [6, 5],
+      "faulty_cell": [8, 6],
+      "expected_effect": "P1 may take the shorter interior route and trigger the true water trap while P2 remains unaffected."
+    },
+    {
+      "id": "f-fire-upper-coordinate-shift",
+      "class": "accidental",
+      "phase": "upper-crossing",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "fire",
+      "true_cell": [8, 3],
+      "faulty_cell": [2, 1],
+      "expected_effect": "P2 may take the middle crossing route and trigger the true fire trap while P1 remains unaffected."
+    },
+    {
+      "id": "f-water-upper-irrelevant-omission",
+      "class": "accidental",
+      "phase": "upper-crossing",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "omission",
+      "hazard": "water",
+      "true_cell": [3, 4],
+      "expected_effect": "The omitted side-corridor fact should not invalidate either selected upper route."
+    },
+    {
+      "id": "a-fire-upper-targeted-coordinate-shift",
+      "class": "adversarial",
+      "phase": "upper-crossing",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "fire",
+      "true_cell": [8, 3],
+      "faulty_cell": [2, 1],
+      "expected_effect": "A malicious P1 relocates a route-relevant fire report so that P2 may enter the true fire trap."
+    }
+  ]
+}

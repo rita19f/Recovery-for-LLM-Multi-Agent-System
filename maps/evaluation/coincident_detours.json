@@ -1,0 +1,90 @@
+{
+  "schema_version": 3,
+  "id": "coincident-detours-eval-v1",
+  "description": "Held-out base case with coincident starts and goals, two short detours, and complementary hazard sensing.",
+  "world_model": "shared",
+  "dimensions": {"width": 7, "height": 7},
+  "coordinate_system": {"origin": "top-left", "cell": "[x, y]"},
+  "public_rows": [
+    "###.###",
+    "#.....#",
+    "##.#.##",
+    "#.....#",
+    "##.#.##",
+    "#.....#",
+    "###.###"
+  ],
+  "hazards": {
+    "fire": [[4, 2]],
+    "water": [[2, 4], [1, 3]]
+  },
+  "agents": {
+    "P1": {"sensor": "fire", "start": [3, 6], "goal": [3, 0]},
+    "P2": {"sensor": "water", "start": [3, 6], "goal": [3, 0]}
+  },
+  "observation_radius": 2,
+  "message_fact_limit": 2,
+  "step_limit": 28,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {"P1": ["UP"], "P2": ["UP"]},
+  "phases": [
+    {
+      "id": "lower-detour",
+      "start": [3, 5],
+      "target": [3, 3],
+      "max_actions": 10,
+      "reference_routes": [
+        ["LEFT", "UP", "UP", "RIGHT"],
+        ["RIGHT", "UP", "UP", "LEFT"]
+      ]
+    },
+    {
+      "id": "upper-detour",
+      "start": [3, 3],
+      "target": [3, 1],
+      "max_actions": 10,
+      "reference_routes": [
+        ["LEFT", "UP", "UP", "RIGHT"],
+        ["RIGHT", "UP", "UP", "LEFT"]
+      ]
+    }
+  ],
+  "finale_actions": {"P1": ["UP"], "P2": ["UP"]},
+  "faults": [
+    {
+      "id": "f-water-lower-branch-swap",
+      "class": "accidental",
+      "phase": "lower-detour",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "water",
+      "true_cell": [2, 4],
+      "faulty_cell": [4, 4],
+      "expected_effect": "P1 may be directed onto the true water cell on the left detour."
+    },
+    {
+      "id": "f-water-upper-side-omission",
+      "class": "accidental",
+      "phase": "upper-detour",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "omission",
+      "hazard": "water",
+      "true_cell": [1, 3],
+      "expected_effect": "The omitted side-cell report should not change either valid upper detour."
+    },
+    {
+      "id": "a-fire-upper-branch-swap",
+      "class": "adversarial",
+      "phase": "upper-detour",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "fire",
+      "true_cell": [4, 2],
+      "faulty_cell": [2, 2],
+      "expected_effect": "A malicious fire report may steer P2 onto the true fire cell on the right detour."
+    }
+  ]
+}

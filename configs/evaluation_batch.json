@@ -1,0 +1,84 @@
+{
+  "name": "phase1-evaluation-tritonai",
+  "description": "Frozen held-out Phase 1 clean, propagation, restart, and verification matrix.",
+  "expected_endpoint_host": "tritonai-api.ucsd.edu",
+  "expected_model": "api-glm-5.3",
+  "repetitions": 3,
+  "defaults": {
+    "planning_granularity": "chunk",
+    "chunk_size": 3,
+    "request_timeout": 180,
+    "detection_delay_ticks": 0
+  },
+  "runs": [
+    {
+      "id": "clean-coincident-base",
+      "map": "maps/evaluation/coincident_detours.json",
+      "mode": "clean"
+    },
+    {
+      "id": "clean-three-portal",
+      "map": "maps/evaluation/three_portal_exchange.json",
+      "mode": "clean"
+    },
+    {
+      "id": "clean-staged-crossing",
+      "map": "maps/evaluation/staged_crossing.json",
+      "mode": "clean"
+    },
+    {
+      "id": "restart-base-accidental-relevant",
+      "map": "maps/evaluation/coincident_detours.json",
+      "mode": "full-restart",
+      "fault": "f-water-lower-branch-swap"
+    },
+    {
+      "id": "restart-base-accidental-irrelevant",
+      "map": "maps/evaluation/coincident_detours.json",
+      "mode": "full-restart",
+      "fault": "f-water-upper-side-omission"
+    },
+    {
+      "id": "restart-base-adversarial-relevant",
+      "map": "maps/evaluation/coincident_detours.json",
+      "mode": "full-restart",
+      "fault": "a-fire-upper-branch-swap"
+    },
+    {
+      "id": "restart-portal-accidental-transient",
+      "map": "maps/evaluation/three_portal_exchange.json",
+      "mode": "full-restart",
+      "fault": "f-water-center-first-report-omission"
+    },
+    {
+      "id": "restart-portal-adversarial-relevant",
+      "map": "maps/evaluation/three_portal_exchange.json",
+      "mode": "full-restart",
+      "fault": "a-fire-center-relocated-right"
+    },
+    {
+      "id": "restart-staged-accidental-relevant",
+      "map": "maps/evaluation/staged_crossing.json",
+      "mode": "full-restart",
+      "fault": "f-water-lower-center-to-outer"
+    },
+    {
+      "id": "restart-staged-adversarial-relevant",
+      "map": "maps/evaluation/staged_crossing.json",
+      "mode": "full-restart",
+      "fault": "a-fire-lower-center-to-outer"
+    },
+    {
+      "id": "verify-base-accidental-relevant",
+      "map": "maps/evaluation/coincident_detours.json",
+      "mode": "always-verify",
+      "fault": "f-water-lower-branch-swap"
+    },
+    {
+      "id": "verify-base-adversarial-relevant",
+      "map": "maps/evaluation/coincident_detours.json",
+      "mode": "always-verify",
+      "fault": "a-fire-upper-branch-swap"
+    }
+  ]
+}

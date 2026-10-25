@@ -1,0 +1,55 @@
+{
+  "name": "development-tritonai",
+  "description": "Development-only clean, propagation, restart, and verification runs.",
+  "expected_endpoint_host": "tritonai-api.ucsd.edu",
+  "expected_model": "api-glm-5.3",
+  "repetitions": 3,
+  "defaults": {
+    "planning_granularity": "chunk",
+    "chunk_size": 3,
+    "request_timeout": 180,
+    "detection_delay_ticks": 0
+  },
+  "runs": [
+    {
+      "id": "clean-small",
+      "map": "maps/development/shared_static_traps_small.json",
+      "mode": "clean"
+    },
+    {
+      "id": "clean-asymmetric",
+      "map": "maps/development/shared_asymmetric_crossing.json",
+      "mode": "clean"
+    },
+    {
+      "id": "restart-accidental-relevant",
+      "map": "maps/development/shared_asymmetric_crossing.json",
+      "mode": "full-restart",
+      "fault": "f-water-lower-coordinate-shift"
+    },
+    {
+      "id": "restart-accidental-irrelevant",
+      "map": "maps/development/shared_asymmetric_crossing.json",
+      "mode": "full-restart",
+      "fault": "f-water-upper-irrelevant-omission"
+    },
+    {
+      "id": "restart-adversarial-relevant",
+      "map": "maps/development/shared_asymmetric_crossing.json",
+      "mode": "full-restart",
+      "fault": "a-fire-upper-targeted-coordinate-shift"
+    },
+    {
+      "id": "verify-accidental-relevant",
+      "map": "maps/development/shared_asymmetric_crossing.json",
+      "mode": "always-verify",
+      "fault": "f-water-lower-coordinate-shift"
+    },
+    {
+      "id": "verify-adversarial-relevant",
+      "map": "maps/development/shared_asymmetric_crossing.json",
+      "mode": "always-verify",
+      "fault": "a-fire-upper-targeted-coordinate-shift"
+    }
+  ]
+}

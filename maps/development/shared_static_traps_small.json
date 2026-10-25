@@ -1,0 +1,84 @@
+{
+  "schema_version": 3,
+  "id": "shared-static-traps-small-v1",
+  "description": "Two autonomous robots move in one shared physical map with complementary fire and water sensing.",
+  "world_model": "shared",
+  "dimensions": {"width": 7, "height": 7},
+  "coordinate_system": {"origin": "top-left", "cell": "[x, y]"},
+  "public_rows": [
+    "###.###",
+    "#.....#",
+    "#.###.#",
+    "#.....#",
+    "#.###.#",
+    "#.....#",
+    "###.###"
+  ],
+  "hazards": {
+    "fire": [[5, 2]],
+    "water": [[1, 4], [5, 1]]
+  },
+  "agents": {
+    "P1": {"sensor": "fire", "start": [3, 6], "goal": [3, 0]},
+    "P2": {"sensor": "water", "start": [1, 5], "goal": [3, 1]}
+  },
+  "observation_radius": 2,
+  "message_fact_limit": 2,
+  "step_limit": 32,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {
+    "P1": ["UP"],
+    "P2": ["RIGHT", "RIGHT"]
+  },
+  "phases": [
+    {
+      "id": "lower-junction",
+      "start": [3, 5],
+      "target": [3, 3],
+      "max_actions": 14,
+      "reference_routes": [
+        ["LEFT", "LEFT", "UP", "UP", "RIGHT", "RIGHT"],
+        ["RIGHT", "RIGHT", "UP", "UP", "LEFT", "LEFT"]
+      ]
+    },
+    {
+      "id": "upper-junction",
+      "start": [3, 3],
+      "target": [3, 1],
+      "max_actions": 14,
+      "reference_routes": [
+        ["LEFT", "LEFT", "UP", "UP", "RIGHT", "RIGHT"],
+        ["RIGHT", "RIGHT", "UP", "UP", "LEFT", "LEFT"]
+      ]
+    }
+  ],
+  "finale_actions": {
+    "P1": ["UP"],
+    "P2": []
+  },
+  "faults": [
+    {
+      "id": "f-water-lower-coordinate-shift",
+      "class": "accidental",
+      "phase": "lower-junction",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "water",
+      "true_cell": [1, 4],
+      "faulty_cell": [5, 4],
+      "expected_effect": "P1 may choose the left branch and encounter the true water trap; P2's own navigation remains unaffected."
+    },
+    {
+      "id": "f-water-upper-irrelevant-omission",
+      "class": "accidental",
+      "phase": "upper-junction",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "omission",
+      "hazard": "water",
+      "true_cell": [5, 1],
+      "expected_effect": "The saved plan should remain valid because the fire trap at [5,2] already blocks the same branch."
+    }
+  ]
+}

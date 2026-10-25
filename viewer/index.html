@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multi-Agent Recovery Replay</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Safe Multi-Agent Recovery</p>
+        <h1>Multi-Agent Recovery Replay</h1>
+      </div>
+      <div class="run-picker">
+        <label for="run-select">Experiment run</label>
+        <select id="run-select" aria-label="Experiment run"></select>
+      </div>
+    </header>
+
+    <section id="error-banner" class="error-banner" role="alert" hidden></section>
+
+    <section class="summary-strip" aria-label="Run summary">
+      <div><span>Mode</span><strong id="metric-mode">—</strong></div>
+      <div><span>Planner</span><strong id="metric-planner">—</strong></div>
+      <div><span>Outcome</span><strong id="metric-outcome">—</strong></div>
+      <div><span>LLM calls</span><strong id="metric-calls">—</strong></div>
+      <div><span>Total tokens</span><strong id="metric-tokens">—</strong></div>
+      <div><span>End-to-end</span><strong id="metric-latency">—</strong></div>
+      <div><span>Recovery</span><strong id="metric-recovery-latency">—</strong></div>
+      <div><span>Fault</span><strong id="metric-fault">—</strong></div>
+    </section>
+
+    <section class="playback" aria-label="Playback controls">
+      <div class="transport">
+        <button id="prev-button" type="button" aria-label="Previous event">←</button>
+        <button id="play-button" type="button" class="primary">Play</button>
+        <button id="next-button" type="button" aria-label="Next event">→</button>
+      </div>
+      <input id="event-slider" type="range" min="0" max="0" value="0" aria-label="Event position">
+      <div class="playback-meta">
+        <span id="event-counter">0 / 0</span>
+        <label for="speed-select">Speed</label>
+        <select id="speed-select">
+          <option value="1200">0.75×</option>
+          <option value="700" selected>1×</option>
+          <option value="350">2×</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="map-column">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Shared physical world</p>
+            <h2 id="phase-heading">Map replay</h2>
+          </div>
+          <div class="view-control">
+            <label for="view-mode">Knowledge view</label>
+            <select id="view-mode" aria-describedby="view-caption">
+              <option value="memory" selected>Agent memory</option>
+              <option value="current">Current sensor view</option>
+              <option value="truth">Ground truth</option>
+            </select>
+          </div>
+        </div>
+        <div class="lane-grid">
+          <article class="lane-panel p1-panel">
+            <div class="lane-heading"><strong id="map-title-p1">P1 · Belief view</strong><span id="map-subtitle-p1">Fire sensor</span></div>
+            <div id="map-p1" class="map" role="img" aria-label="P1 view of the shared map"></div>
+            <p id="position-p1" class="position">Position —</p>
+          </article>
+          <article class="lane-panel p2-panel">
+            <div class="lane-heading"><strong id="map-title-p2">P2 · Belief view</strong><span id="map-subtitle-p2">Water sensor</span></div>
+            <div id="map-p2" class="map" role="img" aria-label="P2 view of the shared map"></div>
+            <p id="position-p2" class="position">Position —</p>
+          </article>
+        </div>
+        <div class="legend" aria-label="Map legend">
+          <span><i class="legend-agent p1"></i>P1 path</span>
+          <span><i class="legend-agent p2"></i>P2 path</span>
+          <span><i class="legend-fire">F</i>Fire trap</span>
+          <span><i class="legend-water">W</i>Water trap</span>
+          <span><i class="legend-wall"></i>Wall</span>
+          <span><i class="legend-fog">?</i>Unknown</span>
+          <span><i class="legend-visible"></i>Current FOV</span>
+          <span><i class="legend-reported">!</i>Reported fact</span>
+        </div>
+        <p id="view-caption" class="view-caption">Two belief views of the same physical world: accumulated observations, private sensor facts, and received messages.</p>
+      </div>
+
+      <aside class="inspector" aria-label="Replay inspector">
+        <div class="tabs" role="tablist" aria-label="Inspector section">
+          <button class="tab active" type="button" role="tab" aria-selected="true" data-tab="event">Event</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-tab="messages">Messages</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-tab="plans">LLM plans</button>
+        </div>
+        <div id="event-panel" class="tab-panel" role="tabpanel" aria-live="polite"></div>
+        <div id="messages-panel" class="tab-panel" role="tabpanel" hidden></div>
+        <div id="plans-panel" class="tab-panel" role="tabpanel" hidden></div>
+      </aside>
+    </section>
+
+    <section class="timeline-section">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Causal trace</p>
+          <h2>Event timeline</h2>
+        </div>
+        <span id="attempt-label" class="attempt-label">Attempt —</span>
+      </div>
+      <div id="timeline" class="timeline" aria-label="Event timeline"></div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

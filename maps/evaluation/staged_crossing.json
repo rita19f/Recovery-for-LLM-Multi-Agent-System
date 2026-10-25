@@ -1,0 +1,117 @@
+{
+  "schema_version": 3,
+  "id": "staged-crossing-eval-v1",
+  "description": "Held-out large case with two sequential crossings, delayed hazard discovery, and asymmetric final goals.",
+  "world_model": "shared",
+  "dimensions": {"width": 11, "height": 9},
+  "coordinate_system": {"origin": "top-left", "cell": "[x, y]"},
+  "public_rows": [
+    "###.###.###",
+    "#.........#",
+    "#.##.#.##.#",
+    "#.........#",
+    "#.#.###.#.#",
+    "#.........#",
+    "#.###.###.#",
+    "#.........#",
+    "###.###.###"
+  ],
+  "hazards": {
+    "fire": [[6, 7], [6, 2]],
+    "water": [[4, 7], [4, 2]]
+  },
+  "agents": {
+    "P1": {"sensor": "fire", "start": [3, 8], "goal": [3, 0]},
+    "P2": {"sensor": "water", "start": [7, 8], "goal": [7, 0]}
+  },
+  "observation_radius": 4,
+  "message_fact_limit": 2,
+  "step_limit": 70,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {"P1": ["UP"], "P2": ["UP"]},
+  "phases": [
+    {
+      "id": "lower-crossing",
+      "start": {"P1": [3, 7], "P2": [7, 7]},
+      "target": {"P1": [9, 5], "P2": [1, 5]},
+      "max_actions": {"P1": 18, "P2": 18},
+      "reference_routes": {
+        "P1": [
+          ["RIGHT", "RIGHT", "UP", "UP", "RIGHT", "RIGHT", "RIGHT", "RIGHT"],
+          ["LEFT", "LEFT", "UP", "UP", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT"]
+        ],
+        "P2": [
+          ["LEFT", "LEFT", "UP", "UP", "LEFT", "LEFT", "LEFT", "LEFT"],
+          ["RIGHT", "RIGHT", "UP", "UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT"]
+        ]
+      }
+    },
+    {
+      "id": "upper-crossing",
+      "start": {"P1": [9, 5], "P2": [1, 5]},
+      "target": {"P1": [3, 0], "P2": [7, 0]},
+      "max_actions": {"P1": 22, "P2": 22},
+      "reference_routes": {
+        "P1": [
+          ["UP", "UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "UP", "UP", "LEFT", "UP"],
+          ["UP", "UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "UP", "UP", "RIGHT", "RIGHT", "UP"]
+        ],
+        "P2": [
+          ["UP", "UP", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "UP", "UP", "RIGHT", "UP"],
+          ["UP", "UP", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "UP", "UP", "LEFT", "LEFT", "UP"]
+        ]
+      }
+    }
+  ],
+  "finale_actions": {"P1": [], "P2": []},
+  "faults": [
+    {
+      "id": "f-water-lower-center-to-outer",
+      "class": "accidental",
+      "phase": "lower-crossing",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "water",
+      "true_cell": [4, 7],
+      "faulty_cell": [1, 6],
+      "expected_effect": "P1 may prefer the center portal and trigger the relocated water hazard."
+    },
+    {
+      "id": "f-water-upper-delayed-shift",
+      "class": "accidental",
+      "phase": "upper-crossing",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "water",
+      "true_cell": [4, 2],
+      "faulty_cell": [1, 2],
+      "expected_effect": "This late report is exposed to planning but should arrive after P1 has already committed to a safe continuation."
+    },
+    {
+      "id": "a-fire-lower-center-to-outer",
+      "class": "adversarial",
+      "phase": "lower-crossing",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "fire",
+      "true_cell": [6, 7],
+      "faulty_cell": [9, 6],
+      "expected_effect": "A malicious report can push P2 away from the outer-right route and into the true center fire trap."
+    },
+    {
+      "id": "a-fire-upper-delayed-shift",
+      "class": "adversarial",
+      "phase": "upper-crossing",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "fire",
+      "true_cell": [6, 2],
+      "faulty_cell": [9, 2],
+      "expected_effect": "The late malicious report is exposed but should not alter P2's already-safe continuation."
+    }
+  ]
+}

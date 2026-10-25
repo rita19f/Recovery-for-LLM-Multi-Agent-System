@@ -1,0 +1,90 @@
+{
+  "schema_version": 3,
+  "id": "three-portal-exchange-eval-v1",
+  "description": "Held-out medium case where agents exchange sides through one of three vertical portals before reaching separate goals.",
+  "world_model": "shared",
+  "dimensions": {"width": 9, "height": 9},
+  "coordinate_system": {"origin": "top-left", "cell": "[x, y]"},
+  "public_rows": [
+    "##.###.##",
+    "#.......#",
+    "#.##.##.#",
+    "#.......#",
+    "#.##.##.#",
+    "#.......#",
+    "#..#.#..#",
+    "#.......#",
+    "#########"
+  ],
+  "hazards": {
+    "fire": [[5, 7]],
+    "water": [[3, 7], [6, 6]]
+  },
+  "agents": {
+    "P1": {"sensor": "fire", "start": [2, 7], "goal": [6, 0]},
+    "P2": {"sensor": "water", "start": [6, 7], "goal": [2, 0]}
+  },
+  "observation_radius": 4,
+  "message_fact_limit": 2,
+  "step_limit": 44,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {"P1": [], "P2": []},
+  "phases": [
+    {
+      "id": "portal-exchange",
+      "start": {"P1": [2, 7], "P2": [6, 7]},
+      "target": {"P1": [6, 3], "P2": [2, 3]},
+      "max_actions": {"P1": 18, "P2": 18},
+      "reference_routes": {
+        "P1": [
+          ["RIGHT", "RIGHT", "UP", "UP", "UP", "UP", "RIGHT", "RIGHT"],
+          ["LEFT", "UP", "UP", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "UP", "UP", "LEFT"]
+        ],
+        "P2": [
+          ["LEFT", "LEFT", "UP", "UP", "UP", "UP", "LEFT", "LEFT"],
+          ["RIGHT", "UP", "UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "UP", "UP", "RIGHT"]
+        ]
+      }
+    },
+    {
+      "id": "separate-exits",
+      "start": {"P1": [6, 3], "P2": [2, 3]},
+      "target": {"P1": [6, 0], "P2": [2, 0]},
+      "max_actions": {"P1": 10, "P2": 10},
+      "reference_routes": {
+        "P1": [
+          ["RIGHT", "UP", "UP", "LEFT", "UP"]
+        ],
+        "P2": [
+          ["LEFT", "UP", "UP", "RIGHT", "UP"]
+        ]
+      }
+    }
+  ],
+  "finale_actions": {"P1": [], "P2": []},
+  "faults": [
+    {
+      "id": "f-water-center-first-report-omission",
+      "class": "accidental",
+      "phase": "portal-exchange",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "omission",
+      "hazard": "water",
+      "true_cell": [3, 7],
+      "expected_effect": "The first warning is omitted but a later retransmission should arrive before P1 executes a relevant unsafe action."
+    },
+    {
+      "id": "a-fire-center-relocated-right",
+      "class": "adversarial",
+      "phase": "portal-exchange",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "fire",
+      "true_cell": [5, 7],
+      "faulty_cell": [7, 6],
+      "expected_effect": "A malicious report may push P2 away from the outer-right route and into the true fire trap."
+    }
+  ]
+}
