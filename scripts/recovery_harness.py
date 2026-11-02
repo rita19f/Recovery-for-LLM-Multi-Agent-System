@@ -2226,7 +2226,7 @@ class LLMBackend(Backend):
                     raise EpisodeError(
                         f"LLM endpoint returned HTTP {exc.code}: {detail}{hint}"
                     ) from exc
-                except urllib.error.URLError as exc:
+                except (urllib.error.URLError, TimeoutError) as exc:
                     error_text = redact_secrets(str(exc), [self.key])
                     self.call_records.append(
                         {

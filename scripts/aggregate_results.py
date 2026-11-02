@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -316,6 +317,8 @@ def error_category(status: str, error_type: Any, error: Any) -> str:
     if status == "ok":
         return "none"
     text = f"{error_type or ''} {error or ''}".lower()
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
     if "json" in text or "schema" in text or "validation" in text:
         return "malformed_output"
     if "loop" in text:
@@ -356,6 +359,19 @@ def outcome_to_row(
     error_record = load_error(output_dir) if status != "ok" else {}
     error_text = error_record.get("error", result.get("error"))
     error_type = error_record.get("error_type")
+    stderr_text = outcome.get("stderr", "")
+    if (
+        status != "ok"
+        and not error_record
+        and result.get("error") == "runner returned non-JSON stdout"
+        and isinstance(stderr_text, str)
+        and stderr_text.strip()
+    ):
+        final_stderr_line = stderr_text.strip().splitlines()[-1]
+        error_text = final_stderr_line
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):", final_stderr_line)
+        if match:
+            error_type = match.group(1)
     usage = episode.get("usage", {}) if isinstance(episode, dict) else {}
     latency = episode.get("latency_ms", {}) if isinstance(episode, dict) else {}
     fault_metrics = (
@@ -380,6 +396,15 @@ def outcome_to_row(
         if isinstance(paired_baselines, dict)
         else {}
     )
+    row_mode = episode.get("mode", condition.get("mode"))
+    detection_delay_ticks = episode.get(
+        "detection_delay_ticks", condition.get("detection_delay_ticks")
+    )
+    # Detection delay is not part of a clean condition. Successful clean
+    # episodes store None, while failed child runs fall back to manifest
+    # defaults; normalize both paths so one condition cannot split in two.
+    if row_mode == "clean":
+        detection_delay_ticks = None
     row: dict[str, Any] = {
         "batch_name": batch.get("batch_name"),
         "run_id": outcome.get("run_id"),
@@ -390,7 +415,7 @@ def outcome_to_row(
         "backend": batch.get("backend"),
         "model": batch.get("model"),
         "map_id": episode.get("map_id", condition.get("map_id")),
-        "mode": episode.get("mode", condition.get("mode")),
+        "mode": row_mode,
         "verification_policy": episode.get("verification_policy"),
         "fault_id": episode.get("fault_id", condition.get("fault_id")),
         "fault_class": episode.get("fault_class", condition.get("fault_class")),
@@ -407,9 +432,7 @@ def outcome_to_row(
             "planning_granularity", condition.get("planning_granularity")
         ),
         "chunk_size": episode.get("chunk_size", condition.get("chunk_size")),
-        "detection_delay_ticks": episode.get(
-            "detection_delay_ticks", condition.get("detection_delay_ticks")
-        ),
+        "detection_delay_ticks": detection_delay_ticks,
         "final_success": episode.get("final_success", episode.get("success")),
         "initial_success": episode.get("initial_success"),
         "clean_episode_success": episode.get("clean_episode_success"),

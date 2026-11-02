@@ -1395,6 +1395,26 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertEqual(payload["reasoning"], {"enabled": False})
         self.assertEqual(payload["max_tokens"], 1200)
 
+    def test_llm_backend_turns_socket_timeout_into_episode_error(self) -> None:
+        backend = LLMBackend(
+            url="https://api.together.ai/v1/chat/completions",
+            key="test-key",
+            model="Qwen/Qwen3.5-9B",
+        )
+        with patch(
+            "recovery_harness.urllib.request.urlopen",
+            side_effect=TimeoutError("read timed out"),
+        ):
+            with self.assertRaisesRegex(EpisodeError, "request failed"):
+                backend._chat(
+                    kind="communicate",
+                    agent="P1",
+                    phase="test",
+                    messages=[{"role": "user", "content": "return JSON"}],
+                )
+        self.assertEqual(backend.call_records[-1]["error_type"], "transport_error")
+        self.assertIn("timed out", backend.call_records[-1]["error"])
+
     def test_llm_verifier_uses_verification_schema_and_trusted_facts(self) -> None:
         class FakeResponse:
             def __enter__(self):

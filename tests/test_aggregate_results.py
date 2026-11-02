@@ -17,6 +17,7 @@ from aggregate_results import (  # noqa: E402
     collect_rows,
     condition_rows,
     discover_batch_summaries,
+    error_category,
     paired_condition_rows,
 )
 
@@ -101,7 +102,7 @@ class AggregateResultsTest(unittest.TestCase):
                         "fault_class": None,
                         "planning_granularity": "chunk",
                         "chunk_size": 3,
-                        "detection_delay_ticks": None,
+                        "detection_delay_ticks": 0,
                     },
                     "result": {"status": "timeout", "error": "too slow"},
                     "stderr": "",
@@ -123,6 +124,45 @@ class AggregateResultsTest(unittest.TestCase):
             self.assertEqual(summary[0]["n_planned"], 2)
             self.assertEqual(summary[0]["n_timeout"], 1)
             self.assertEqual(summary[0]["task_success_rate_all_runs"], 0.5)
+
+    def test_non_json_child_timeout_is_recovered_from_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            batch = {
+                "batch_name": "fixture",
+                "backend": "llm",
+                "model": "test-model",
+                "outcomes": [
+                    {
+                        "run_id": "timeout-r01",
+                        "return_code": 1,
+                        "output_dir": str(root / "timeout-r01"),
+                        "condition": {
+                            "condition_id": "timeout-condition",
+                            "repetition": 1,
+                            "map_id": "map",
+                            "mode": "full-restart",
+                            "fault_id": "fault",
+                            "fault_class": "adversarial",
+                            "planning_granularity": "chunk",
+                            "chunk_size": 3,
+                            "detection_delay_ticks": 0,
+                        },
+                        "result": {
+                            "status": "error",
+                            "error": "runner returned non-JSON stdout",
+                        },
+                        "stderr": "traceback omitted\nTimeoutError: read timed out",
+                    }
+                ],
+            }
+            batch_path = root / "batch-summary.json"
+            batch_path.write_text(json.dumps(batch))
+            rows, _ = collect_rows([batch_path])
+        self.assertEqual(rows[0]["error_type"], "TimeoutError")
+        self.assertEqual(rows[0]["error_category"], "timeout")
+        self.assertEqual(rows[0]["error"], "TimeoutError: read timed out")
+        self.assertEqual(error_category("error", "TimeoutError", "read timed out"), "timeout")
 
     def test_cli_writes_all_phase1_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
