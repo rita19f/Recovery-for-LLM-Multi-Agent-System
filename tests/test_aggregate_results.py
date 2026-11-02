@@ -203,6 +203,87 @@ class AggregateResultsTest(unittest.TestCase):
         self.assertEqual(summary["delta_total_tokens_mean"], 30.0)
         self.assertEqual(summary["full_restart_wasted_total_tokens_mean"], 10.0)
 
+    def test_verifier_confusion_is_pooled_across_runs(self) -> None:
+        base = {
+            "backend": "llm",
+            "model": "test-model",
+            "map_id": "map",
+            "mode": "llm-verify",
+            "fault_id": "fault",
+            "fault_class": "accidental",
+            "planning_granularity": "chunk",
+            "chunk_size": 3,
+            "detection_delay_ticks": 0,
+            "run_status": "ok",
+        }
+        rows = [
+            {
+                **base,
+                "verification_tp": 1,
+                "verification_fp": 0,
+                "verification_fn": 0,
+                "verification_tn": 3,
+            },
+            {
+                **base,
+                "verification_tp": 0,
+                "verification_fp": 1,
+                "verification_fn": 1,
+                "verification_tn": 2,
+            },
+        ]
+        summary = condition_rows(rows)[0]
+        self.assertEqual(summary["verification_tp_sum"], 1)
+        self.assertEqual(summary["verification_fp_sum"], 1)
+        self.assertEqual(summary["verification_fn_sum"], 1)
+        self.assertEqual(summary["verification_tn_sum"], 5)
+        self.assertEqual(summary["verification_pooled_precision"], 0.5)
+        self.assertEqual(summary["verification_pooled_recall"], 0.5)
+        self.assertEqual(summary["verification_accuracy"], 0.75)
+
+    def test_historical_route_relevance_fields_are_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "legacy-r01"
+            run_dir.mkdir()
+            (run_dir / "episode-summary.json").write_text(
+                json.dumps(
+                    {
+                        "map_id": "legacy-map",
+                        "mode": "no-recovery",
+                        "fault_id": "legacy-fault",
+                        "fault_metrics": {
+                            "fault_counterfactually_relevant_plan": True,
+                            "fault_counterfactually_relevant_executed": False,
+                        },
+                    }
+                )
+            )
+            batch = {
+                "batch_name": "legacy",
+                "backend": "llm",
+                "model": "test-model",
+                "outcomes": [
+                    {
+                        "run_id": "legacy-r01",
+                        "return_code": 0,
+                        "output_dir": str(run_dir),
+                        "condition": {
+                            "condition_id": "legacy-condition",
+                            "repetition": 1,
+                        },
+                        "result": {"status": "ok"},
+                    }
+                ],
+            }
+            batch_path = root / "batch-summary.json"
+            batch_path.write_text(json.dumps(batch))
+            rows, _ = collect_rows([batch_path])
+        self.assertTrue(rows[0]["fault_structured_route_relevant_plan"])
+        self.assertFalse(rows[0]["fault_structured_route_relevant_executed"])
+        self.assertEqual(rows[0]["condition_id"], "legacy-condition")
+        self.assertEqual(rows[0]["repetition"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

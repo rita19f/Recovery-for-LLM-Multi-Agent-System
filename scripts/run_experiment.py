@@ -82,7 +82,13 @@ def main() -> int:
     parser.add_argument("map", type=Path)
     parser.add_argument(
         "--mode",
-        choices=("clean", "no-recovery", "full-restart", "always-verify"),
+        choices=(
+            "clean",
+            "no-recovery",
+            "full-restart",
+            "always-verify",
+            "llm-verify",
+        ),
         default="clean",
     )
     parser.add_argument("--fault")
@@ -249,6 +255,7 @@ def main() -> int:
                 "output": str(output_dir),
                 "map_id": result["map_id"],
                 "mode": result["mode"],
+                "verification_policy": result["verification_policy"],
                 "fault_id": result["fault_id"],
                 "fault_class": result["fault_class"],
                 "planning_granularity": result["planning_granularity"],
@@ -260,12 +267,17 @@ def main() -> int:
                 "clean_episode_success": result["clean_episode_success"],
                 "ever_failed": result["ever_failed"],
                 "attempt_count": result["attempt_count"],
+                "executed_actions": result["executed_actions"],
+                "message_count": result["message_count"],
                 "trap_entries": result["trap_entries"],
                 "safety_violations": result["safety_violations"],
                 "fault_metrics": result["fault_metrics"],
                 "dependency_quality": result["dependency_quality"],
                 "verification_checks": result["verification_checks"],
                 "verification_rejections": result["verification_rejections"],
+                "verification_confusion": result["verification_confusion"],
+                "verification_llm_calls": result["verification_llm_calls"],
+                "verification_usage": result["verification_usage"],
                 "detection": result["detection"],
                 "paired_baselines": result["paired_baselines"],
                 "recovery_triggered": result["recovery_triggered"],

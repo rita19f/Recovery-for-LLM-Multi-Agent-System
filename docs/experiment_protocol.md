@@ -36,25 +36,29 @@ The development batch currently covers:
 - irrelevant accidental omission;
 - relevant adversarial targeted coordinate corruption;
 - paired no-recovery/full-restart accounting;
-- trusted-source always verification;
+- trusted-source oracle verification;
+- provenance-assisted LLM verification on the coincident base map;
 - three repetitions per condition by default.
 
 The official matrix includes both immediate detection and one three-tick
 delayed-detection condition. Detection delay is a controlled experimental
-factor, not an automated detector.
+factor, not an automated detector. It contains 14 conditions and 42 planned
+runs at the default three repetitions.
 
 ## Required measurements
 
 - clean and recovered joint success;
 - trap entries and other unsafe actions;
-- fault injection, delivery, planner exposure, plan relevance, executed harm,
-  and caused failure;
+- fault injection, delivery, planner exposure, structured route relevance,
+  executed harm, and caused failure;
 - declared versus actual injection phase/tick and observed detection delay;
 - affected workflow stages, blocked unsafe-action attempts, and executed
   unauthorized actions;
 - plan-level dependency TP/FP/FN/TN;
 - LLM calls and prompt/completion tokens;
-- end-to-end, LLM, recovery, and dependency-tracking latency;
+- verifier TP/FP/FN/TN, calls, tokens, and latency;
+- end-to-end, LLM, recovery, verification, and dependency-tracking latency;
+- executed primitive actions and structured message count;
 - wasted prefix work for full restart, plus retained and recomputed work once
   selective recovery is implemented;
 - all failed, malformed, null, skipped, and timed-out runs.
@@ -68,6 +72,15 @@ rates carry explicit `_completed` and `_all_runs` suffixes.
 ## Baseline interpretation
 
 Full restart and no recovery must share the same first faulty trajectory.
-Trusted-source always verify is an oracle prevention upper bound. The final
-recovery comparison must also include checkpoint restart so that dependency
-tracking is credited only for savings beyond ordinary checkpointing.
+Trusted-source always verify is an oracle prevention upper bound. `llm-verify`
+receives the same trusted source facts, but its accept/reject decision is made
+by an additional model call; false positives and false negatives are retained
+as outcomes. It is therefore a provenance-assisted verifier rather than an
+unassisted fault detector. The final recovery comparison must also include
+checkpoint restart so that dependency tracking is credited only for savings
+beyond ordinary checkpointing.
+
+`fault_structured_route_relevant_plan` and
+`fault_structured_route_relevant_executed` are deterministic operational labels
+computed from the frozen route representation. They must not be described as
+causal-dependency ground truth.

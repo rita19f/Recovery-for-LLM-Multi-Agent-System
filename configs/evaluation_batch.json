@@ -80,6 +80,18 @@
       "map": "maps/evaluation/coincident_detours.json",
       "mode": "always-verify",
       "fault": "a-fire-upper-branch-swap"
+    },
+    {
+      "id": "llm-verify-base-accidental-relevant",
+      "map": "maps/evaluation/coincident_detours.json",
+      "mode": "llm-verify",
+      "fault": "f-water-lower-branch-swap"
+    },
+    {
+      "id": "llm-verify-base-adversarial-relevant",
+      "map": "maps/evaluation/coincident_detours.json",
+      "mode": "llm-verify",
+      "fault": "a-fire-upper-branch-swap"
     }
   ]
 }

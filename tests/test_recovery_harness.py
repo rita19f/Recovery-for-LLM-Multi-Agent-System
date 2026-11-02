@@ -45,6 +45,45 @@ RELEVANT_FAULT = "f-water-lower-coordinate-shift"
 IRRELEVANT_FAULT = "f-water-lower-irrelevant-omission"
 
 
+class SimulatedLLMVerifierBackend(ScriptedBackend):
+    """Scripted navigation with an LLM-shaped verifier call record."""
+
+    def __init__(self, *, always_accept: bool = False) -> None:
+        super().__init__()
+        self.always_accept = always_accept
+
+    def verify(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        phase: str,
+        message_facts: list[dict],
+        trusted_source_facts: list[dict],
+    ) -> dict:
+        valid = self.always_accept or message_facts == trusted_source_facts
+        self.call_records.append(
+            {
+                "backend": "llm",
+                "kind": "verify",
+                "agent": "verifier",
+                "sender": sender,
+                "recipient": recipient,
+                "phase": phase,
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 5,
+                    "total_tokens": 25,
+                },
+                "latency_ms": 2.0,
+            }
+        )
+        return {
+            "valid": valid,
+            "reason": "simulated verifier verdict",
+        }
+
+
 class RecoveryHarnessTest(unittest.TestCase):
     def setUp(self) -> None:
         self.data = json.loads(MAP_PATH.read_text())
@@ -278,12 +317,14 @@ class RecoveryHarnessTest(unittest.TestCase):
                 "recovery",
                 "llm",
                 "dependency_tracking",
+                "verification",
             },
         )
         self.assertGreaterEqual(result["latency_ms"]["end_to_end"], 0)
         self.assertGreaterEqual(result["latency_ms"]["initial_execution"], 0)
         self.assertIsNone(result["latency_ms"]["recovery"])
         self.assertEqual(result["latency_ms"]["llm"], 0)
+        self.assertEqual(result["latency_ms"]["verification"], 0)
         self.assertGreaterEqual(result["latency_ms"]["dependency_tracking"], 0)
         self.assertIn("latency_ms", result["attempts"][0])
 
@@ -362,8 +403,8 @@ class RecoveryHarnessTest(unittest.TestCase):
         metrics = result["fault_metrics"]
         self.assertTrue(metrics["fault_delivered_to_recipient"])
         self.assertTrue(metrics["fault_exposed_to_planner"])
-        self.assertTrue(metrics["fault_counterfactually_relevant_plan"])
-        self.assertTrue(metrics["fault_counterfactually_relevant_executed"])
+        self.assertTrue(metrics["fault_structured_route_relevant_plan"])
+        self.assertTrue(metrics["fault_structured_route_relevant_executed"])
         self.assertTrue(metrics["fault_caused_failure"])
         self.assertGreaterEqual(result["dependency_quality"]["declared"]["tp"], 1)
 
@@ -379,6 +420,8 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertEqual(result["trap_entries"], 0)
         self.assertGreater(result["verification_checks"], 0)
         self.assertEqual(result["verification_rejections"], 1)
+        self.assertEqual(result["verification_confusion"]["tp"], 1)
+        self.assertEqual(result["verification_llm_calls"], 0)
         self.assertFalse(result["fault_metrics"]["fault_delivered_to_recipient"])
         self.assertTrue(
             any(
@@ -386,6 +429,42 @@ class RecoveryHarnessTest(unittest.TestCase):
                 for event in result["attempts"][0]["events"]
             )
         )
+
+    def test_llm_verify_can_reject_and_regenerate_faulty_message(self) -> None:
+        result = run_experiment(
+            self.data,
+            SimulatedLLMVerifierBackend(),
+            mode="llm-verify",
+            fault_id=RELEVANT_FAULT,
+            detection_delay_ticks=0,
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["trap_entries"], 0)
+        self.assertEqual(result["verification_rejections"], 1)
+        self.assertEqual(result["verification_confusion"]["tp"], 1)
+        self.assertGreater(result["verification_confusion"]["tn"], 0)
+        self.assertEqual(
+            result["verification_llm_calls"], result["verification_checks"]
+        )
+        self.assertEqual(
+            result["verification_usage"]["total_tokens"],
+            25 * result["verification_llm_calls"],
+        )
+        self.assertFalse(result["fault_metrics"]["fault_delivered_to_recipient"])
+
+    def test_llm_verify_miss_allows_fault_to_propagate(self) -> None:
+        result = run_experiment(
+            self.data,
+            SimulatedLLMVerifierBackend(always_accept=True),
+            mode="llm-verify",
+            fault_id=RELEVANT_FAULT,
+            detection_delay_ticks=0,
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["verification_rejections"], 0)
+        self.assertEqual(result["verification_confusion"]["fn"], 1)
+        self.assertTrue(result["fault_metrics"]["fault_delivered_to_recipient"])
+        self.assertTrue(result["fault_metrics"]["fault_caused_failure"])
 
     def test_asymmetric_map_includes_structured_adversarial_fault(self) -> None:
         data = json.loads(ASYMMETRIC_MAP_PATH.read_text())
@@ -1315,6 +1394,79 @@ class RecoveryHarnessTest(unittest.TestCase):
         )
         self.assertEqual(payload["reasoning"], {"enabled": False})
         self.assertEqual(payload["max_tokens"], 1200)
+
+    def test_llm_verifier_uses_verification_schema_and_trusted_facts(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {
+                                            "valid": False,
+                                            "reason": "coordinate mismatch",
+                                        }
+                                    )
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 5,
+                            "total_tokens": 25,
+                        },
+                    }
+                ).encode()
+
+        backend = LLMBackend(
+            url="https://api.together.ai/v1/chat/completions",
+            key="test-key",
+            model="Qwen/Qwen3.5-9B",
+        )
+        with patch(
+            "recovery_harness.urllib.request.urlopen", return_value=FakeResponse()
+        ) as mocked:
+            verdict = backend.verify(
+                sender="P2",
+                recipient="P1",
+                phase="lower-junction",
+                message_facts=[
+                    {
+                        "source_fact_id": "fact-1",
+                        "hazard": "water",
+                        "cell": [5, 4],
+                    }
+                ],
+                trusted_source_facts=[
+                    {
+                        "source_fact_id": "fact-1",
+                        "hazard": "water",
+                        "cell": [1, 4],
+                    }
+                ],
+            )
+
+        self.assertFalse(verdict["valid"])
+        request = mocked.call_args.args[0]
+        payload = json.loads(request.data)
+        self.assertEqual(
+            payload["response_format"]["json_schema"]["name"],
+            "verification_output",
+        )
+        verifier_payload = json.loads(payload["messages"][1]["content"])
+        self.assertEqual(
+            verifier_payload["trusted_source_facts"][0]["cell"], [1, 4]
+        )
+        self.assertEqual(backend.call_records[-1]["kind"], "verify")
 
     def test_llm_backend_uses_openai_gpt54_parameters(self) -> None:
         class FakeResponse:

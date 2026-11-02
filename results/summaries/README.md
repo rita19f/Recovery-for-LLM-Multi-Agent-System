@@ -15,7 +15,8 @@ The command writes:
 
 - `run_level.csv`: one row for every planned run, including errors/timeouts;
 - `condition_summary.csv`: success rates, fault funnel rates, pooled dependency
-  confusion metrics, and mean/standard deviation of cost and latency;
+  and verifier confusion metrics, and mean/standard deviation of workload,
+  cost, and latency;
 - `paired_recovery.csv`: no-recovery versus full-restart values from the same
   faulty trajectory;
 - `paired_condition_summary.csv`: paired success, cost, waste, and deltas

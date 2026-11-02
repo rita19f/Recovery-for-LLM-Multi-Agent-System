@@ -22,12 +22,15 @@ from typing import Any, Iterable
 RUN_FIELDS = [
     "batch_name",
     "run_id",
+    "condition_id",
+    "repetition",
     "run_status",
     "return_code",
     "backend",
     "model",
     "map_id",
     "mode",
+    "verification_policy",
     "fault_id",
     "fault_class",
     "fault_selection_rule_type",
@@ -47,6 +50,8 @@ RUN_FIELDS = [
     "ever_failed",
     "recovery_triggered",
     "attempt_count",
+    "executed_actions",
+    "message_count",
     "trap_entries",
     "safety_violations",
     "backend_calls",
@@ -59,13 +64,14 @@ RUN_FIELDS = [
     "recovery_ms",
     "llm_ms",
     "dependency_tracking_ms",
+    "verification_ms",
     "fault_injected",
     "fault_delivered_to_recipient",
     "fault_exposed_to_planner",
     "fault_explicitly_consumed",
     "fault_structurally_consumed",
-    "fault_counterfactually_relevant_plan",
-    "fault_counterfactually_relevant_executed",
+    "fault_structured_route_relevant_plan",
+    "fault_structured_route_relevant_executed",
     "fault_caused_failure",
     "affected_stage_count",
     "fault_affected_stages",
@@ -95,6 +101,14 @@ RUN_FIELDS = [
     "conservative_recall",
     "verification_checks",
     "verification_rejections",
+    "verification_llm_calls",
+    "verification_prompt_tokens",
+    "verification_completion_tokens",
+    "verification_total_tokens",
+    "verification_tp",
+    "verification_fp",
+    "verification_fn",
+    "verification_tn",
     "error_category",
     "error_type",
     "error",
@@ -117,6 +131,8 @@ GROUP_FIELDS = [
 METRIC_FIELDS = [
     "trap_entries",
     "safety_violations",
+    "executed_actions",
+    "message_count",
     "backend_calls",
     "llm_calls",
     "prompt_tokens",
@@ -127,8 +143,13 @@ METRIC_FIELDS = [
     "recovery_ms",
     "llm_ms",
     "dependency_tracking_ms",
+    "verification_ms",
     "verification_checks",
     "verification_rejections",
+    "verification_llm_calls",
+    "verification_prompt_tokens",
+    "verification_completion_tokens",
+    "verification_total_tokens",
     "affected_stage_count",
     "unauthorized_actions",
     "blocked_unsafe_action_attempts",
@@ -158,12 +179,16 @@ PAIR_FIELDS = [
     "shared_faulty_trajectory",
     "no_recovery_success",
     "no_recovery_trap_entries",
+    "no_recovery_executed_actions",
+    "no_recovery_message_count",
     "no_recovery_backend_calls",
     "no_recovery_llm_calls",
     "no_recovery_total_tokens",
     "no_recovery_latency_ms",
     "full_restart_success",
     "full_restart_trap_entries",
+    "full_restart_executed_actions",
+    "full_restart_message_count",
     "full_restart_backend_calls",
     "full_restart_llm_calls",
     "full_restart_total_tokens",
@@ -173,6 +198,8 @@ PAIR_FIELDS = [
     "full_restart_wasted_llm_calls",
     "full_restart_wasted_total_tokens",
     "delta_trap_entries",
+    "delta_executed_actions",
+    "delta_message_count",
     "delta_backend_calls",
     "delta_llm_calls",
     "delta_total_tokens",
@@ -192,11 +219,15 @@ PAIR_GROUP_FIELDS = [
 
 PAIR_METRIC_FIELDS = [
     "no_recovery_trap_entries",
+    "no_recovery_executed_actions",
+    "no_recovery_message_count",
     "no_recovery_backend_calls",
     "no_recovery_llm_calls",
     "no_recovery_total_tokens",
     "no_recovery_latency_ms",
     "full_restart_trap_entries",
+    "full_restart_executed_actions",
+    "full_restart_message_count",
     "full_restart_backend_calls",
     "full_restart_llm_calls",
     "full_restart_total_tokens",
@@ -206,6 +237,8 @@ PAIR_METRIC_FIELDS = [
     "full_restart_wasted_llm_calls",
     "full_restart_wasted_total_tokens",
     "delta_trap_entries",
+    "delta_executed_actions",
+    "delta_message_count",
     "delta_backend_calls",
     "delta_llm_calls",
     "delta_total_tokens",
@@ -218,8 +251,8 @@ FAULT_BOOLEAN_FIELDS = [
     "fault_exposed_to_planner",
     "fault_explicitly_consumed",
     "fault_structurally_consumed",
-    "fault_counterfactually_relevant_plan",
-    "fault_counterfactually_relevant_executed",
+    "fault_structured_route_relevant_plan",
+    "fault_structured_route_relevant_executed",
     "fault_caused_failure",
 ]
 
@@ -334,6 +367,14 @@ def outcome_to_row(
     paired_baselines = (
         episode.get("paired_baselines") if isinstance(episode, dict) else None
     )
+    verification_usage = (
+        episode.get("verification_usage", {}) if isinstance(episode, dict) else {}
+    )
+    verification_confusion = (
+        episode.get("verification_confusion", {})
+        if isinstance(episode, dict)
+        else {}
+    )
     restart_pair = (
         paired_baselines.get("full_restart", {})
         if isinstance(paired_baselines, dict)
@@ -342,12 +383,15 @@ def outcome_to_row(
     row: dict[str, Any] = {
         "batch_name": batch.get("batch_name"),
         "run_id": outcome.get("run_id"),
+        "condition_id": condition.get("condition_id"),
+        "repetition": condition.get("repetition"),
         "run_status": status,
         "return_code": outcome.get("return_code"),
         "backend": batch.get("backend"),
         "model": batch.get("model"),
         "map_id": episode.get("map_id", condition.get("map_id")),
         "mode": episode.get("mode", condition.get("mode")),
+        "verification_policy": episode.get("verification_policy"),
         "fault_id": episode.get("fault_id", condition.get("fault_id")),
         "fault_class": episode.get("fault_class", condition.get("fault_class")),
         "fault_selection_rule_type": nested(
@@ -373,6 +417,8 @@ def outcome_to_row(
         "ever_failed": episode.get("ever_failed"),
         "recovery_triggered": episode.get("recovery_triggered"),
         "attempt_count": episode.get("attempt_count"),
+        "executed_actions": episode.get("executed_actions"),
+        "message_count": episode.get("message_count"),
         "trap_entries": episode.get("trap_entries"),
         "safety_violations": episode.get("safety_violations"),
         "backend_calls": episode.get("backend_calls"),
@@ -385,6 +431,7 @@ def outcome_to_row(
         "recovery_ms": nested(latency, "recovery"),
         "llm_ms": nested(latency, "llm"),
         "dependency_tracking_ms": nested(latency, "dependency_tracking"),
+        "verification_ms": nested(latency, "verification"),
         "affected_stage_count": fault_metrics.get("affected_stage_count"),
         "fault_affected_stages": json.dumps(
             episode.get("fault_affected_stages", []), separators=(",", ":")
@@ -399,6 +446,16 @@ def outcome_to_row(
         "wasted_total_tokens": nested(restart_pair, "wasted_usage", "total_tokens"),
         "verification_checks": episode.get("verification_checks"),
         "verification_rejections": episode.get("verification_rejections"),
+        "verification_llm_calls": episode.get("verification_llm_calls"),
+        "verification_prompt_tokens": verification_usage.get("prompt_tokens"),
+        "verification_completion_tokens": verification_usage.get(
+            "completion_tokens"
+        ),
+        "verification_total_tokens": verification_usage.get("total_tokens"),
+        "verification_tp": verification_confusion.get("tp"),
+        "verification_fp": verification_confusion.get("fp"),
+        "verification_fn": verification_confusion.get("fn"),
+        "verification_tn": verification_confusion.get("tn"),
         "error_category": error_category(status, error_type, error_text),
         "error_type": error_type,
         "error": error_text,
@@ -409,8 +466,21 @@ def outcome_to_row(
         ),
         "batch_summary": f"{batch_path.parent.name}/{batch_path.name}",
     }
+    legacy_fault_aliases = {
+        "fault_structured_route_relevant_plan": (
+            "fault_counterfactually_relevant_plan"
+        ),
+        "fault_structured_route_relevant_executed": (
+            "fault_counterfactually_relevant_executed"
+        ),
+    }
     for key in FAULT_BOOLEAN_FIELDS:
-        row[key] = fault_metrics.get(key) if isinstance(fault_metrics, dict) else None
+        if isinstance(fault_metrics, dict):
+            row[key] = fault_metrics.get(
+                key, fault_metrics.get(legacy_fault_aliases.get(key, ""))
+            )
+        else:
+            row[key] = None
     row.update(dependency_columns(episode))
     return row, paired_baselines if status == "ok" else None
 
@@ -555,6 +625,48 @@ def condition_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if actual_positive == 0
                 else round(totals["tp"] / actual_positive, 4)
             )
+        verification_totals = {
+            metric: sum(
+                int(item.get(f"verification_{metric}") or 0)
+                for item in group
+                if item["run_status"] == "ok"
+            )
+            for metric in ("tp", "fp", "fn", "tn")
+        }
+        summary.update(
+            {
+                f"verification_{metric}_sum": value
+                for metric, value in verification_totals.items()
+            }
+        )
+        verification_predicted_positive = (
+            verification_totals["tp"] + verification_totals["fp"]
+        )
+        verification_actual_positive = (
+            verification_totals["tp"] + verification_totals["fn"]
+        )
+        verification_total = sum(verification_totals.values())
+        summary["verification_pooled_precision"] = (
+            None
+            if verification_predicted_positive == 0
+            else round(
+                verification_totals["tp"] / verification_predicted_positive, 4
+            )
+        )
+        summary["verification_pooled_recall"] = (
+            None
+            if verification_actual_positive == 0
+            else round(verification_totals["tp"] / verification_actual_positive, 4)
+        )
+        summary["verification_accuracy"] = (
+            None
+            if verification_total == 0
+            else round(
+                (verification_totals["tp"] + verification_totals["tn"])
+                / verification_total,
+                4,
+            )
+        )
         output.append(summary)
     return output
 
@@ -587,6 +699,8 @@ def make_paired_row(row: dict[str, Any], paired: dict[str, Any]) -> dict[str, An
     for prefix, values in (("no_recovery", no_recovery), ("full_restart", restart)):
         output[f"{prefix}_success"] = values.get("success")
         output[f"{prefix}_trap_entries"] = values.get("trap_entries")
+        output[f"{prefix}_executed_actions"] = values.get("executed_actions")
+        output[f"{prefix}_message_count"] = values.get("message_count")
         output[f"{prefix}_backend_calls"] = values.get("backend_calls")
         output[f"{prefix}_llm_calls"] = values.get("llm_calls")
         output[f"{prefix}_total_tokens"] = nested(values, "usage", "total_tokens")
@@ -601,7 +715,15 @@ def make_paired_row(row: dict[str, Any], paired: dict[str, Any]) -> dict[str, An
     output["full_restart_wasted_total_tokens"] = nested(
         restart, "wasted_usage", "total_tokens"
     )
-    for metric in ("trap_entries", "backend_calls", "llm_calls", "total_tokens", "latency_ms"):
+    for metric in (
+        "trap_entries",
+        "executed_actions",
+        "message_count",
+        "backend_calls",
+        "llm_calls",
+        "total_tokens",
+        "latency_ms",
+    ):
         left = numeric(output.get(f"full_restart_{metric}"))
         right = numeric(output.get(f"no_recovery_{metric}"))
         output[f"delta_{metric}"] = None if left is None or right is None else round(left - right, 4)

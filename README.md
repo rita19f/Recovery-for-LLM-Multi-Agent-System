@@ -14,7 +14,8 @@ The Phase 1 implementation provides:
 
 - clean and fault-injected shared-world execution;
 - accidental and adversarial structured message faults;
-- no-recovery, full-restart, and trusted-source always-verify baselines;
+- no-recovery, full-restart, trusted-source oracle verification, and LLM
+  verification baselines;
 - controlled detection timing;
 - append-only observations, messages, plans, actions, and dependency metadata;
 - paired no-recovery/full-restart accounting from the same faulty trajectory;
@@ -135,6 +136,26 @@ python3 scripts/run_experiment.py \
 `always-verify` compares messages with immutable source sensor facts. It is an
 oracle prevention baseline and does not represent a deployable LLM verifier.
 
+LLM verification against the same trusted source facts:
+
+```bash
+python3 scripts/run_experiment.py \
+  maps/development/shared_asymmetric_crossing.json \
+  --backend llm \
+  --mode llm-verify \
+  --fault f-water-lower-coordinate-shift \
+  --planning-granularity chunk \
+  --chunk-size 3 \
+  --detection-delay-ticks 0
+```
+
+`llm-verify` adds one verifier request before each structured message is
+delivered. Rejected messages are regenerated from the trusted facts. Verifier
+TP/FP/FN/TN, calls, tokens, and latency are reported separately, so this
+baseline measures both the protection and the added cost. It is still a
+provenance-assisted verifier, not a detector that discovers faults without a
+trusted source.
+
 ## Run a reproducible batch
 
 Preview the development commands without spending API quota:
@@ -165,7 +186,7 @@ Use `--repetitions 1` for an inexpensive integration check. Do not use the
 development batch as final held-out evidence.
 
 The official held-out manifest is `configs/evaluation_batch.json`. Inspect its
-36 planned runs before spending quota:
+42 planned runs before spending quota:
 
 ```bash
 python3 scripts/run_batch.py configs/evaluation_batch.json
@@ -214,9 +235,15 @@ calls.json
 Important summary fields:
 
 - `fault_metrics`: injection, delivery, planner exposure, declared/structured
-  dependency, plan relevance, executed harm, caused failure, affected stages,
-  blocked unsafe-action attempts, and executed unauthorized actions;
+  dependency, structured route relevance, executed harm, caused failure,
+  affected stages, blocked unsafe-action attempts, and executed unauthorized
+  actions. Structured route relevance is an operational label from the frozen
+  route representation, not a claim of causal-dependency ground truth;
 - `dependency_quality`: plan-level TP/FP/FN/TN, precision, and recall;
+- `verification_confusion`, `verification_llm_calls`, `verification_usage`,
+  and `latency_ms.verification`: verifier quality and marginal cost;
+- `executed_actions` and `message_count`: workload measures that complement
+  model-call and token counts;
 - `fault_declared_phase`, `fault_injection_phase`, and
   `fault_injection_tick`: the precommitted and observed injection schedule;
 - `detection`: the chargeable prefix boundary and observed delay;

@@ -951,6 +951,43 @@ def communication_messages(
     ]
 
 
+def verification_messages(
+    *,
+    sender: str,
+    recipient: str,
+    phase: str,
+    message_facts: list[dict[str, Any]],
+    trusted_source_facts: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Build an independent message-verification request.
+
+    The verifier is intentionally given the immutable source facts.  This is a
+    verification baseline, not an automated detector operating without access
+    to provenance.
+    """
+    payload = {
+        "sender": sender,
+        "recipient": recipient,
+        "phase": phase,
+        "candidate_message_facts": message_facts,
+        "trusted_source_facts": trusted_source_facts,
+    }
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You verify one structured inter-agent message against immutable trusted "
+                "sensor facts. The candidate is valid only when it contains exactly the "
+                "same source_fact_id, hazard, and [x,y] cell values as the trusted facts: "
+                "no changed coordinate, changed hazard, invented fact, or omitted fact. "
+                "Return JSON only: {\"valid\":bool,\"reason\":str}. Keep reason under "
+                "160 characters."
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, sort_keys=True)},
+    ]
+
+
 def planning_messages(
     *,
     data: dict[str, Any],
@@ -1200,6 +1237,19 @@ def response_schema(kind: str) -> tuple[str, dict[str, Any]]:
                 "additionalProperties": False,
             },
         )
+    if kind == "verify":
+        return (
+            "verification_output",
+            {
+                "type": "object",
+                "properties": {
+                    "valid": {"type": "boolean"},
+                    "reason": {"type": "string", "maxLength": 160},
+                },
+                "required": ["valid", "reason"],
+                "additionalProperties": False,
+            },
+        )
     if kind == "step_plan":
         return (
             "step_plan_output",
@@ -1336,6 +1386,16 @@ def validate_message_output(
             }
         )
     return {"message_facts": normalized, "note": str(output.get("note", ""))}
+
+
+def validate_verification_output(output: dict[str, Any]) -> dict[str, Any]:
+    valid = output.get("valid")
+    reason = output.get("reason")
+    if not isinstance(valid, bool):
+        raise EpisodeError("verification output valid must be a boolean")
+    if not isinstance(reason, str):
+        raise EpisodeError("verification output reason must be a string")
+    return {"valid": valid, "reason": reason[:160]}
 
 
 def validate_plan_output(
@@ -1704,6 +1764,17 @@ class Backend:
     ) -> dict[str, Any]:
         raise NotImplementedError
 
+    def verify(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        phase: str,
+        message_facts: list[dict[str, Any]],
+        trusted_source_facts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
     def plan(
         self,
         *,
@@ -1744,6 +1815,35 @@ class ScriptedBackend(Backend):
             {"backend": "scripted", "kind": "communicate", "agent": agent, "phase": phase}
         )
         return output
+
+    def verify(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        phase: str,
+        message_facts: list[dict[str, Any]],
+        trusted_source_facts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        valid = message_facts == trusted_source_facts
+        self.call_records.append(
+            {
+                "backend": "scripted",
+                "kind": "verify",
+                "agent": "verifier",
+                "sender": sender,
+                "recipient": recipient,
+                "phase": phase,
+            }
+        )
+        return {
+            "valid": valid,
+            "reason": (
+                "candidate exactly matches trusted facts"
+                if valid
+                else "candidate differs from trusted facts"
+            ),
+        }
 
     def plan(
         self,
@@ -1873,6 +1973,31 @@ class DryRunBackend(ScriptedBackend):
         )
         self.call_records[-1]["prompt"] = communication_messages(
             agent=agent, phase=phase, sensor_facts=sensor_facts, limit=limit
+        )
+        return result
+
+    def verify(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        phase: str,
+        message_facts: list[dict[str, Any]],
+        trusted_source_facts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        result = super().verify(
+            sender=sender,
+            recipient=recipient,
+            phase=phase,
+            message_facts=message_facts,
+            trusted_source_facts=trusted_source_facts,
+        )
+        self.call_records[-1]["prompt"] = verification_messages(
+            sender=sender,
+            recipient=recipient,
+            phase=phase,
+            message_facts=message_facts,
+            trusted_source_facts=trusted_source_facts,
         )
         return result
 
@@ -2013,7 +2138,7 @@ class LLMBackend(Backend):
             (4096, 8192)
             if is_tritonai
             and self.model == "api-glm-5.3"
-            and kind != "communicate"
+            and kind not in {"communicate", "verify"}
             else (1200, 2400)
         )
         last_error: Exception | None = None
@@ -2213,6 +2338,27 @@ class LLMBackend(Backend):
             agent=agent, phase=phase, sensor_facts=sensor_facts, limit=limit
         )
         return self._chat(kind="communicate", agent=agent, phase=phase, messages=messages)
+
+    def verify(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        phase: str,
+        message_facts: list[dict[str, Any]],
+        trusted_source_facts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        messages = verification_messages(
+            sender=sender,
+            recipient=recipient,
+            phase=phase,
+            message_facts=message_facts,
+            trusted_source_facts=trusted_source_facts,
+        )
+        output = self._chat(
+            kind="verify", agent="verifier", phase=phase, messages=messages
+        )
+        return validate_verification_output(output)
 
     def plan(
         self,
@@ -2637,8 +2783,8 @@ def run_attempt(
         raise ValueError("chunk_size must be at least 1")
     if detection_delay_ticks is not None and detection_delay_ticks < 0:
         raise ValueError("detection_delay_ticks must be non-negative or None")
-    if verification_policy not in {"none", "trusted-source"}:
-        raise ValueError("verification_policy must be none or trusted-source")
+    if verification_policy not in {"none", "trusted-source", "llm"}:
+        raise ValueError("verification_policy must be none, trusted-source, or llm")
 
     trace = AttemptTrace(attempt)
     starts = {agent: agent_cell(data, agent, "start") for agent in AGENTS}
@@ -2674,6 +2820,11 @@ def run_attempt(
     plan_dependency_evaluations: list[dict[str, Any]] = []
     verification_checks = 0
     verification_rejections = 0
+    verification_tp = 0
+    verification_fp = 0
+    verification_fn = 0
+    verification_tn = 0
+    verification_latency_ns = 0
     detection: dict[str, Any] | None = None
     failure: dict[str, Any] | None = None
     global_tick = 0
@@ -2711,6 +2862,9 @@ def run_attempt(
             "event_count": len(trace.events),
             "executed_action_count": sum(
                 event["event_type"] == "action_executed" for event in trace.events
+            ),
+            "message_count": sum(
+                artifact["artifact_type"] == "message" for artifact in trace.artifacts
             ),
             "safety_violations": sum(
                 event["event_type"] == "trap_triggered" for event in trace.events
@@ -2787,6 +2941,8 @@ def run_attempt(
         nonlocal fault_injected_phase
         nonlocal fault_delivered_to_recipient
         nonlocal verification_checks, verification_rejections
+        nonlocal verification_tp, verification_fp, verification_fn, verification_tn
+        nonlocal verification_latency_ns
         for agent in AGENTS:
             pending = [
                 fact_registry[agent][fact_id]
@@ -2863,7 +3019,8 @@ def run_attempt(
             recipient = PARTNER[agent]
             effective_message_id = message_id
             effective_delivery = delivered
-            if verification_policy == "trusted-source":
+            if verification_policy in {"trusted-source", "llm"}:
+                verification_started_ns = perf_counter_ns()
                 verification_checks += 1
                 expected_items = [
                     {
@@ -2874,15 +3031,45 @@ def run_attempt(
                     for fact_id in selected_source_ids
                 ]
                 actual_items = delivered["message_facts"]
-                verified = actual_items == expected_items
+                ground_truth_valid = actual_items == expected_items
+                verifier_name = (
+                    "trusted-source-verifier"
+                    if verification_policy == "trusted-source"
+                    else "llm-verifier"
+                )
+                if verification_policy == "trusted-source":
+                    verdict = {
+                        "valid": ground_truth_valid,
+                        "reason": "deterministic comparison with trusted source facts",
+                    }
+                else:
+                    verdict = backend.verify(
+                        sender=agent,
+                        recipient=recipient,
+                        phase=phase_id,
+                        message_facts=actual_items,
+                        trusted_source_facts=expected_items,
+                    )
+                    verdict = validate_verification_output(verdict)
+                verified = verdict["valid"]
+                if not ground_truth_valid and not verified:
+                    verification_tp += 1
+                elif ground_truth_valid and not verified:
+                    verification_fp += 1
+                elif not ground_truth_valid and verified:
+                    verification_fn += 1
+                else:
+                    verification_tn += 1
                 verification_id = trace.artifact(
                     "verification",
-                    agent="trusted-source-verifier",
+                    agent=verifier_name,
                     phase=phase_id,
                     tick=tick,
                     message_artifact_id=message_id,
                     source_fact_ids=selected_source_ids,
                     valid=verified,
+                    ground_truth_valid=ground_truth_valid,
+                    reason=verdict["reason"],
                     source_ids=[message_id, *selected_source_ids],
                 )
                 trace.event(
@@ -2891,12 +3078,16 @@ def run_attempt(
                     message_artifact_id=message_id,
                     phase=phase_id,
                     tick=tick,
+                    verifier=verifier_name,
+                    ground_truth_valid=ground_truth_valid,
+                    verdict_valid=verified,
+                    reason=verdict["reason"],
                 )
                 if not verified:
                     verification_rejections += 1
                     effective_delivery = {
                         "message_facts": expected_items,
-                        "note": "trusted-source verifier regenerated rejected message",
+                        "note": f"{verifier_name} triggered trusted-source regeneration",
                     }
                     effective_message_id = trace.artifact(
                         "message",
@@ -2918,6 +3109,7 @@ def run_attempt(
                         phase=phase_id,
                         tick=tick,
                     )
+                verification_latency_ns += perf_counter_ns() - verification_started_ns
 
             effective_source_ids = {
                 item["source_fact_id"]
@@ -3019,7 +3211,7 @@ def run_attempt(
         context_exposed = bool(fault_message_id and fault_message_id in input_ids)
         declared = bool(fault_message_id and fault_message_id in declared_ids)
         structured = bool(fault_message_id and fault_message_id in compiler_ids)
-        counterfactually_relevant = bool(
+        structured_route_relevant = bool(
             context_exposed
             and fault is not None
             and list(as_cell(fault["true_cell"])) in predicted_cells
@@ -3028,7 +3220,7 @@ def run_attempt(
             "fault_context_exposed": context_exposed,
             "fault_declared_dependency": declared,
             "fault_structured_dependency": structured,
-            "fault_counterfactually_relevant_plan": counterfactually_relevant,
+            "fault_structured_route_relevant_plan": structured_route_relevant,
             "fault_addition_effect_unmeasured": bool(
                 context_exposed
                 and fault is not None
@@ -3057,8 +3249,8 @@ def run_attempt(
                 "declared": labels["fault_declared_dependency"],
                 "structured": labels["fault_structured_dependency"],
                 "conservative": True,
-                "counterfactually_relevant": labels[
-                    "fault_counterfactually_relevant_plan"
+                "structured_route_relevant": labels[
+                    "fault_structured_route_relevant_plan"
                 ],
             }
             plan_dependency_evaluations.append(evaluation)
@@ -3067,7 +3259,7 @@ def run_attempt(
             fault_explicitly_consumed = True
         if labels["fault_structured_dependency"]:
             fault_structurally_consumed = True
-        if labels["fault_counterfactually_relevant_plan"]:
+        if labels["fault_structured_route_relevant_plan"]:
             fault_plan_relevant = True
         if labels["fault_declared_dependency"] or labels["fault_structured_dependency"]:
             fault_consumed = True
@@ -3562,7 +3754,7 @@ def run_attempt(
                         if is_fault_relevant_action:
                             fault_executed_relevant_action = True
                             trace.event(
-                                "fault_counterfactual_action_executed",
+                                "fault_route_relevant_action_executed",
                                 agent=agent,
                                 phase=phase_id,
                                 tick=global_tick,
@@ -3685,6 +3877,13 @@ def run_attempt(
     trap_entries = sum(
         event["event_type"] == "trap_triggered" for event in trace.events
     )
+    executed_actions = sum(
+        event["event_type"] in {"action_executed", "action_noop"}
+        for event in trace.events
+    )
+    message_count = sum(
+        artifact["artifact_type"] == "message" for artifact in trace.artifacts
+    )
     trace.event(
         "attempt_finished",
         success=success,
@@ -3715,7 +3914,7 @@ def run_attempt(
         counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
         for evaluation in plan_dependency_evaluations:
             predicted = bool(evaluation[method])
-            actual = bool(evaluation["counterfactually_relevant"])
+            actual = bool(evaluation["structured_route_relevant"])
             if predicted and actual:
                 counts["tp"] += 1
             elif predicted:
@@ -3746,6 +3945,8 @@ def run_attempt(
         "final_positions": {agent: list(cell) for agent, cell in positions.items()},
         "steps": step_state,
         "ticks": global_tick,
+        "executed_actions": executed_actions,
+        "message_count": message_count,
         "trap_entries": trap_entries,
         "safety_violations": trap_entries,
         "communication_state": {
@@ -3769,8 +3970,8 @@ def run_attempt(
         "fault_consumed": fault_consumed,
         "fault_explicitly_consumed": fault_explicitly_consumed,
         "fault_structurally_consumed": fault_structurally_consumed,
-        "fault_counterfactually_relevant_plan": fault_plan_relevant,
-        "fault_counterfactually_relevant_executed": (
+        "fault_structured_route_relevant_plan": fault_plan_relevant,
+        "fault_structured_route_relevant_executed": (
             fault_executed_relevant_action
         ),
         "fault_caused_failure": fault_caused_failure,
@@ -3780,7 +3981,7 @@ def run_attempt(
                 for evaluation in plan_dependency_evaluations
                 if evaluation["declared"]
                 or evaluation["structured"]
-                or evaluation["counterfactually_relevant"]
+                or evaluation["structured_route_relevant"]
             }
         ),
         "affected_stage_count": len(
@@ -3789,7 +3990,7 @@ def run_attempt(
                 for evaluation in plan_dependency_evaluations
                 if evaluation["declared"]
                 or evaluation["structured"]
-                or evaluation["counterfactually_relevant"]
+                or evaluation["structured_route_relevant"]
             }
         ),
         # The public action validator never executes a rejected move.  We still
@@ -3807,19 +4008,35 @@ def run_attempt(
         "verification_policy": verification_policy,
         "verification_checks": verification_checks,
         "verification_rejections": verification_rejections,
+        "verification_confusion": {
+            "tp": verification_tp,
+            "fp": verification_fp,
+            "fn": verification_fn,
+            "tn": verification_tn,
+        },
+        "verification_llm_calls": sum(
+            record.get("backend") == "llm" and record.get("kind") == "verify"
+            for record in attempt_records
+        ),
+        "verification_usage": sum_usage(
+            record
+            for record in attempt_records
+            if record.get("backend") == "llm" and record.get("kind") == "verify"
+        ),
         "detection": detection,
         "failure": failure,
         "latency_ms": {
             "end_to_end": elapsed_ms(attempt_started_ns),
             "llm": attempt_llm_latency_ms,
             "dependency_tracking": trace.tracking_latency_ms,
+            "verification": round(verification_latency_ns / 1_000_000, 3),
         },
         "artifacts": trace.artifacts,
         "events": trace.events,
     }
 
 
-def sum_usage(records: list[dict[str, Any]]) -> dict[str, int]:
+def sum_usage(records: Iterable[dict[str, Any]]) -> dict[str, int]:
     totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     for record in records:
         usage = record.get("usage", {})
@@ -3850,12 +4067,24 @@ def run_experiment(
     detection_delay_ticks: int | None = None,
 ) -> dict[str, Any]:
     experiment_started_ns = perf_counter_ns()
-    if mode not in {"clean", "no-recovery", "full-restart", "always-verify"}:
+    if mode not in {
+        "clean",
+        "no-recovery",
+        "full-restart",
+        "always-verify",
+        "llm-verify",
+    }:
         raise ValueError(f"unsupported mode: {mode}")
     fault = None if mode == "clean" else find_fault(data, fault_id)
     if mode != "clean" and fault is None:
         raise ValueError(f"mode {mode} requires --fault")
-    verification_policy = "trusted-source" if mode == "always-verify" else "none"
+    verification_policy = (
+        "trusted-source"
+        if mode == "always-verify"
+        else "llm"
+        if mode == "llm-verify"
+        else "none"
+    )
 
     before_calls = len(backend.call_records)
     first = run_attempt(
@@ -3924,6 +4153,8 @@ def run_experiment(
             "no_recovery": {
                 "success": first["success"],
                 "trap_entries": first["trap_entries"],
+                "executed_actions": first["executed_actions"],
+                "message_count": first["message_count"],
                 "backend_calls": len(first_records),
                 "llm_calls": sum(
                     record.get("backend") == "llm" for record in first_records
@@ -3936,6 +4167,12 @@ def run_experiment(
                 "success": restart["success"],
                 "trap_entries": int(detection_snapshot.get("safety_violations", 0))
                 + restart["trap_entries"],
+                "executed_actions": int(
+                    detection_snapshot.get("executed_action_count", 0)
+                )
+                + restart["executed_actions"],
+                "message_count": int(detection_snapshot.get("message_count", 0))
+                + restart["message_count"],
                 "backend_calls": len(prefix_records) + len(restart_records),
                 "llm_calls": sum(
                     record.get("backend") == "llm"
@@ -3984,6 +4221,8 @@ def run_experiment(
         "clean_episode_success": clean_episode_success,
         "ever_failed": ever_failed,
         "attempt_count": len(attempts),
+        "executed_actions": sum(attempt["executed_actions"] for attempt in attempts),
+        "message_count": sum(attempt["message_count"] for attempt in attempts),
         "trap_entries": trap_entries,
         "safety_violations": trap_entries,
         "fault_metrics": {
@@ -3994,8 +4233,8 @@ def run_experiment(
                 "fault_exposed_to_planner",
                 "fault_explicitly_consumed",
                 "fault_structurally_consumed",
-                "fault_counterfactually_relevant_plan",
-                "fault_counterfactually_relevant_executed",
+                "fault_structured_route_relevant_plan",
+                "fault_structured_route_relevant_executed",
                 "fault_caused_failure",
                 "affected_stage_count",
                 "unauthorized_actions",
@@ -4010,6 +4249,21 @@ def run_experiment(
         "verification_rejections": sum(
             attempt["verification_rejections"] for attempt in attempts
         ),
+        "verification_confusion": {
+            metric: sum(
+                attempt["verification_confusion"][metric] for attempt in attempts
+            )
+            for metric in ("tp", "fp", "fn", "tn")
+        },
+        "verification_llm_calls": sum(
+            attempt["verification_llm_calls"] for attempt in attempts
+        ),
+        "verification_usage": {
+            metric: sum(
+                attempt["verification_usage"][metric] for attempt in attempts
+            )
+            for metric in ("prompt_tokens", "completion_tokens", "total_tokens")
+        },
         "detection": first["detection"],
         "paired_baselines": paired_baselines,
         "attempts": attempts,
@@ -4022,6 +4276,10 @@ def run_experiment(
             "recovery": recovery_latency_ms,
             "llm": llm_latency_ms,
             "dependency_tracking": dependency_tracking_latency_ms,
+            "verification": round(
+                sum(attempt["latency_ms"]["verification"] for attempt in attempts),
+                3,
+            ),
         },
         "call_records": records,
     }
@@ -4080,11 +4338,11 @@ def run_scheduler_preflight(
                 "fault_structurally_consumed": attempt[
                     "fault_structurally_consumed"
                 ],
-                "fault_counterfactually_relevant_plan": attempt[
-                    "fault_counterfactually_relevant_plan"
+                "fault_structured_route_relevant_plan": attempt[
+                    "fault_structured_route_relevant_plan"
                 ],
-                "fault_counterfactually_relevant_executed": attempt[
-                    "fault_counterfactually_relevant_executed"
+                "fault_structured_route_relevant_executed": attempt[
+                    "fault_structured_route_relevant_executed"
                 ],
                 "fault_caused_failure": attempt["fault_caused_failure"],
                 "final_success": result["final_success"],
@@ -4093,9 +4351,9 @@ def run_scheduler_preflight(
                     "outcome_relevant"
                     if attempt["fault_caused_failure"]
                     else "executed_without_task_failure"
-                    if attempt["fault_counterfactually_relevant_executed"]
+                    if attempt["fault_structured_route_relevant_executed"]
                     else "plan_relevant_without_execution"
-                    if attempt["fault_counterfactually_relevant_plan"]
+                    if attempt["fault_structured_route_relevant_plan"]
                     else "exposed_without_relevant_plan"
                     if attempt["fault_exposed_to_planner"]
                     else "non_propagating"
