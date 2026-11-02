@@ -24,10 +24,10 @@ The current evaluation suite contains three independently constructed maps:
 - `staged_crossing.json`: 11 x 9 staged topology with delayed observations.
 
 Their geometry and fault scheduling are checked deterministically. The
-precommitted official matrix is `configs/evaluation_batch.json`; do not revise
-it after inspecting official LLM outcomes.
+precommitted evaluation matrix is `configs/evaluation_batch.json`; do not
+revise it after inspecting held-out LLM outcomes.
 
-## Phase 1 matrix
+## Evaluation matrix
 
 The development batch currently covers:
 
@@ -40,7 +40,7 @@ The development batch currently covers:
 - provenance-assisted LLM verification on the coincident base map;
 - three repetitions per condition by default.
 
-The official matrix includes both immediate detection and one three-tick
+The evaluation matrix includes both immediate detection and one three-tick
 delayed-detection condition. Detection delay is a controlled experimental
 factor, not an automated detector. It contains 14 conditions and 42 planned
 runs at the default three repetitions.
@@ -64,7 +64,7 @@ runs at the default three repetitions.
 - all failed, malformed, null, skipped, and timed-out runs.
 
 `scripts/aggregate_results.py` converts batch summaries into the canonical
-run-level, condition-level, paired-run, paired-condition, failure, and Phase 1
+run-level, condition-level, paired-run, paired-condition, failure, and compact
 overview files. API/program success and task success are separate metrics;
 errors and timeouts remain in the primary all-runs denominator. Fault funnel
 rates carry explicit `_completed` and `_all_runs` suffixes.

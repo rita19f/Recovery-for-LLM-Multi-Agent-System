@@ -164,7 +164,7 @@ class AggregateResultsTest(unittest.TestCase):
         self.assertEqual(rows[0]["error"], "TimeoutError: read timed out")
         self.assertEqual(error_category("error", "TimeoutError", "read timed out"), "timeout")
 
-    def test_cli_writes_all_phase1_outputs(self) -> None:
+    def test_cli_writes_all_evaluation_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.build_fixture(root)
@@ -182,14 +182,14 @@ class AggregateResultsTest(unittest.TestCase):
                 "paired_recovery.csv",
                 "paired_condition_summary.csv",
                 "failure_summary.csv",
-                "phase1_summary.json",
+                "evaluation_summary.json",
             ):
                 self.assertTrue((output / name).is_file(), name)
             with (output / "run_level.csv").open(newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 2)
             self.assertEqual({row["run_status"] for row in rows}, {"ok", "timeout"})
-            overview = json.loads((output / "phase1_summary.json").read_text())
+            overview = json.loads((output / "evaluation_summary.json").read_text())
             self.assertEqual(overview["planned_run_records"], 2)
             self.assertEqual(overview["task_success_rate_all_runs"], 0.5)
 

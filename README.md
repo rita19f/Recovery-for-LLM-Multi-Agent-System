@@ -10,7 +10,7 @@ reuse while avoiding the cost of restarting the complete workflow.
 
 ## Current scope
 
-The Phase 1 implementation provides:
+The current implementation provides:
 
 - clean and fault-injected shared-world execution;
 - accidental and adversarial structured message faults;

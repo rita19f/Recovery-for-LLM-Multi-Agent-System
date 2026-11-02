@@ -18,6 +18,6 @@ results/summaries/*
 !results/summaries/paired_recovery.csv
 !results/summaries/paired_condition_summary.csv
 !results/summaries/failure_summary.csv
-!results/summaries/phase1_summary.json
+!results/summaries/evaluation_summary.json
 !results/summaries/dependency_precision_recall.pdf
 !results/summaries/dependency_precision_recall.png

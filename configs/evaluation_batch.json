@@ -1,6 +1,6 @@
 {
-  "name": "phase1-evaluation-tritonai",
-  "description": "Frozen held-out Phase 1 clean, propagation, restart, and verification matrix.",
+  "name": "recovery-evaluation-tritonai",
+  "description": "Frozen held-out clean, propagation, restart, and verification matrix.",
   "expected_endpoint_host": "tritonai-api.ucsd.edu",
   "expected_model": "api-glm-5.3",
   "repetitions": 3,

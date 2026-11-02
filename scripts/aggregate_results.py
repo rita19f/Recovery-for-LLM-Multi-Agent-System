@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate batch outputs into reviewable Phase 1 CSV/JSON summaries.
+"""Aggregate batch outputs into reviewable evaluation CSV/JSON summaries.
 
 The aggregator intentionally keeps errors and timeouts in the run-level table
 and in all denominators. Successful child runs are enriched from their
@@ -882,7 +882,9 @@ def main() -> int:
             "failure_summary": "failure_summary.csv",
         },
     }
-    (output_dir / "phase1_summary.json").write_text(json.dumps(overview, indent=2) + "\n")
+    (output_dir / "evaluation_summary.json").write_text(
+        json.dumps(overview, indent=2) + "\n"
+    )
     print(json.dumps({"status": "ok", "output": str(output_dir), **overview}, indent=2))
     return 0
 

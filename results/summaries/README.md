@@ -22,7 +22,7 @@ The command writes:
 - `paired_condition_summary.csv`: paired success, cost, waste, and deltas
   aggregated across repetitions of each condition;
 - `failure_summary.csv`: failures, timeouts, traps, and successful runs;
-- `phase1_summary.json`: compact machine-readable overview.
+- `evaluation_summary.json`: compact machine-readable overview.
 
 The six canonical aggregate files are allowed by `.gitignore`; raw batch
 directories remain ignored.
