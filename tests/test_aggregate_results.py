@@ -260,7 +260,7 @@ class AggregateResultsTest(unittest.TestCase):
             fault_id=fault_id,
             planning_granularity="chunk",
             chunk_size=3,
-            detection_trigger="after-fault-caused-harm",
+            detection_trigger="after-fault-linked-harm",
             recovery_scope="both",
         )
         condition = {
@@ -270,7 +270,7 @@ class AggregateResultsTest(unittest.TestCase):
             "fault_class": "adversarial",
             "planning_granularity": "chunk",
             "chunk_size": 3,
-            "detection_trigger": "after-fault-caused-harm",
+            "detection_trigger": "after-fault-linked-harm",
             "recovery_scope": "both",
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -358,7 +358,7 @@ class AggregateResultsTest(unittest.TestCase):
             "planning_granularity": "chunk",
             "chunk_size": 3,
             "detection_delay_ticks": None,
-            "detection_trigger": "after-fault-caused-harm",
+            "detection_trigger": "after-fault-linked-harm",
             "no_recovery_full_health_success": False,
             "full_restart_full_health_success": False,
             "full_restart_pre_detection_damage": 1,

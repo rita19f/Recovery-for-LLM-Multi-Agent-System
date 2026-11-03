@@ -107,12 +107,14 @@ RUN_FIELDS = [
     "fault_structurally_consumed",
     "fault_structured_route_relevant_plan",
     "fault_structured_route_relevant_executed",
-    "fault_caused_harm",
-    "fault_caused_failure",
+    "fault_linked_harm",
+    "fault_linked_failure",
     "affected_stage_count",
     "fault_affected_stages",
     "unauthorized_actions",
-    "blocked_unsafe_action_attempts",
+    "blocked_known_hazard_proposals",
+    "true_world_unsafe_entries",
+    "fault_linked_unsafe_entries",
     "wasted_executed_actions",
     "retained_executed_actions",
     "wasted_backend_calls",
@@ -211,7 +213,9 @@ METRIC_FIELDS = [
     "verification_total_tokens",
     "affected_stage_count",
     "unauthorized_actions",
-    "blocked_unsafe_action_attempts",
+    "blocked_known_hazard_proposals",
+    "true_world_unsafe_entries",
+    "fault_linked_unsafe_entries",
     "wasted_executed_actions",
     "retained_executed_actions",
     "wasted_backend_calls",
@@ -344,8 +348,8 @@ FAULT_BOOLEAN_FIELDS = [
     "fault_structurally_consumed",
     "fault_structured_route_relevant_plan",
     "fault_structured_route_relevant_executed",
-    "fault_caused_harm",
-    "fault_caused_failure",
+    "fault_linked_harm",
+    "fault_linked_failure",
 ]
 
 
@@ -610,8 +614,12 @@ def outcome_to_row(
             episode.get("fault_affected_stages", []), separators=(",", ":")
         ),
         "unauthorized_actions": fault_metrics.get("unauthorized_actions"),
-        "blocked_unsafe_action_attempts": fault_metrics.get(
-            "blocked_unsafe_action_attempts"
+        "true_world_unsafe_entries": fault_metrics.get("true_world_unsafe_entries"),
+        "fault_linked_unsafe_entries": fault_metrics.get(
+            "fault_linked_unsafe_entries"
+        ),
+        "blocked_known_hazard_proposals": fault_metrics.get(
+            "blocked_known_hazard_proposals"
         ),
         "wasted_executed_actions": None,
         "retained_executed_actions": None,

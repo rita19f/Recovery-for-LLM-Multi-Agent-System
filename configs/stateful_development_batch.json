@@ -21,7 +21,7 @@
       "map": "maps/development/stateful_weapon_crossing.json",
       "mode": "full-restart",
       "fault": "f-ice-sword-east-offset",
-      "detection_trigger": "after-fault-caused-harm",
+      "detection_trigger": "after-fault-linked-harm",
       "recovery_scope": "both"
     },
     {
@@ -29,7 +29,7 @@
       "map": "maps/development/stateful_weapon_crossing.json",
       "mode": "full-restart",
       "fault": "a-ice-sword-monster-decoy",
-      "detection_trigger": "after-fault-caused-harm",
+      "detection_trigger": "after-fault-linked-harm",
       "recovery_scope": "both"
     },
     {

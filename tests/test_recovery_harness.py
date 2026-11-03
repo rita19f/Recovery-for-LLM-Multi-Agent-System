@@ -16,9 +16,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from recovery_harness import (  # noqa: E402
     assess_step_plan_output,
     AttemptTrace,
+    count_blocked_known_hazard_proposals,
     detect_navigation_loop,
     DryRunBackend,
     EpisodeError,
+    KNOWN_HAZARD_CODE,
     execute_segment,
     HTTP_USER_AGENT,
     initial_runtime_state,
@@ -31,6 +33,7 @@ from recovery_harness import (  # noqa: E402
     parse_sse_chat_response,
     redact_secrets,
     decision_error,
+    decision_issue,
     run_experiment,
     run_scheduler_preflight,
     validate_map,
@@ -38,6 +41,7 @@ from recovery_harness import (  # noqa: E402
     validate_chunk_plan_output,
     validate_plan_output,
     validate_route_plan_output,
+    unauthorized_action_reasons,
     visible_public_cells,
 )
 
@@ -226,8 +230,8 @@ class RecoveryHarnessTest(unittest.TestCase):
                 self.assertEqual(result["irreversible_damage"], 1)
                 self.assertEqual(result["final_health"], {"P1": 2, "P2": 3})
                 self.assertTrue(metrics["fault_structured_route_relevant_plan"])
-                self.assertTrue(metrics["fault_caused_harm"])
-                self.assertFalse(metrics["fault_caused_failure"])
+                self.assertTrue(metrics["fault_linked_harm"])
+                self.assertFalse(metrics["fault_linked_failure"])
 
     def test_stateful_irrelevant_omission_causes_no_harm(self) -> None:
         data = json.loads(STATEFUL_MAP_PATH.read_text())
@@ -243,7 +247,7 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertTrue(metrics["fault_delivered_to_recipient"])
         self.assertTrue(result["full_health_success"])
         self.assertFalse(metrics["fault_structured_route_relevant_executed"])
-        self.assertFalse(metrics["fault_caused_harm"])
+        self.assertFalse(metrics["fault_linked_harm"])
 
     def test_stateful_blocked_fault_is_not_labeled_as_executed(self) -> None:
         data = json.loads(STATEFUL_MAP_PATH.read_text())
@@ -258,7 +262,7 @@ class RecoveryHarnessTest(unittest.TestCase):
         metrics = result["fault_metrics"]
         self.assertFalse(metrics["fault_delivered_to_recipient"])
         self.assertFalse(metrics["fault_structured_route_relevant_executed"])
-        self.assertFalse(metrics["fault_caused_harm"])
+        self.assertFalse(metrics["fault_linked_harm"])
         self.assertTrue(result["full_health_success"])
 
     def test_stateful_full_restart_keeps_pre_detection_damage(self) -> None:
@@ -449,19 +453,19 @@ class RecoveryHarnessTest(unittest.TestCase):
             fault_id="f-fire-sword-west-drop-once",
             planning_granularity="chunk",
             chunk_size=3,
-            detection_trigger="after-fault-caused-harm",
+            detection_trigger="after-fault-linked-harm",
             recovery_scope="agent-only",
         )
 
-        self.assertFalse(result["fault_metrics"]["fault_caused_harm"])
+        self.assertFalse(result["fault_metrics"]["fault_linked_harm"])
         self.assertTrue(result["recovery_triggered"])
         self.assertEqual(
             result["detection"]["reason"],
-            "trigger_not_observed_before_outcome:after-fault-caused-harm",
+            "trigger_not_observed_before_outcome:after-fault-linked-harm",
         )
         self.assertFalse(result["detection"]["trigger_observed"])
 
-    def test_event_trigger_snapshots_immediately_after_fault_caused_harm(
+    def test_event_trigger_snapshots_immediately_after_fault_linked_harm(
         self,
     ) -> None:
         data = json.loads(STATEFUL_MAP_PATH.read_text())
@@ -472,12 +476,12 @@ class RecoveryHarnessTest(unittest.TestCase):
             fault_id="a-ice-sword-monster-decoy",
             planning_granularity="chunk",
             chunk_size=3,
-            detection_trigger="after-fault-caused-harm",
+            detection_trigger="after-fault-linked-harm",
             recovery_scope="agent-only",
         )
 
-        self.assertEqual(result["detection_trigger"], "after-fault-caused-harm")
-        self.assertEqual(result["detection"]["reason"], "after_fault_caused_harm")
+        self.assertEqual(result["detection_trigger"], "after-fault-linked-harm")
+        self.assertEqual(result["detection"]["reason"], "after_fault_linked_harm")
         self.assertTrue(result["detection"]["trigger_observed"])
         self.assertEqual(result["detection"]["damage_taken"], 1)
         self.assertEqual(
@@ -504,7 +508,7 @@ class RecoveryHarnessTest(unittest.TestCase):
             fault_id="a-ice-sword-monster-decoy",
             planning_granularity="chunk",
             chunk_size=3,
-            detection_trigger="after-fault-caused-harm",
+            detection_trigger="after-fault-linked-harm",
             recovery_scope="environment-reset",
         )
 
@@ -920,8 +924,15 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertTrue(metrics["fault_exposed_to_planner"])
         self.assertTrue(metrics["fault_structured_route_relevant_plan"])
         self.assertTrue(metrics["fault_structured_route_relevant_executed"])
-        self.assertTrue(metrics["fault_caused_failure"])
+        self.assertTrue(metrics["fault_linked_failure"])
         self.assertGreaterEqual(result["dependency_quality"]["declared"]["tp"], 1)
+        # The fault-linked trap entry passed validation because the agent's
+        # facts were corrupted, so it is unsafe in the true world but not an
+        # unauthorized action.
+        self.assertEqual(metrics["unauthorized_actions"], 0)
+        self.assertEqual(metrics["true_world_unsafe_entries"], 1)
+        self.assertEqual(metrics["fault_linked_unsafe_entries"], 1)
+        self.assertEqual(metrics["blocked_known_hazard_proposals"], 0)
 
     def test_always_verify_rejects_and_regenerates_faulty_message(self) -> None:
         result = run_experiment(
@@ -979,7 +990,7 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertEqual(result["verification_rejections"], 0)
         self.assertEqual(result["verification_confusion"]["fn"], 1)
         self.assertTrue(result["fault_metrics"]["fault_delivered_to_recipient"])
-        self.assertTrue(result["fault_metrics"]["fault_caused_failure"])
+        self.assertTrue(result["fault_metrics"]["fault_linked_failure"])
 
     def test_asymmetric_map_includes_structured_adversarial_fault(self) -> None:
         data = json.loads(ASYMMETRIC_MAP_PATH.read_text())
@@ -1961,6 +1972,155 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertIn(
             "current limit is 3",
             backend.call_records[0]["semantic_validation_error"],
+        )
+
+    def test_llm_chunk_into_known_hazard_is_blocked_and_counted(self) -> None:
+        backend = LLMBackend(
+            url="https://example.invalid/v1/chat/completions",
+            key="test-key",
+            model="test-model",
+        )
+        responses = iter(
+            [
+                {
+                    "actions": ["LEFT", "LEFT", "UP"],
+                    "waypoint": [1, 4],
+                    "declared_dependency_ids": [],
+                    "reason": "walks into the reported water trap",
+                },
+                {
+                    "actions": ["RIGHT", "RIGHT", "UP"],
+                    "waypoint": [5, 4],
+                    "declared_dependency_ids": ["water-fact"],
+                    "reason": "avoids the reported water trap",
+                },
+            ]
+        )
+
+        def fake_chat(**_kwargs):
+            backend.call_records.append({"backend": "llm"})
+            return next(responses)
+
+        facts = [
+            {"cell": [1, 4], "hazard": "water", "dependency_id": "water-fact"}
+        ]
+        with patch.object(backend, "_chat", side_effect=fake_chat):
+            result = backend.plan(
+                data=self.data,
+                agent="P1",
+                phase=self.data["phases"][0],
+                position=(3, 5),
+                public_cells=visible_public_cells(self.data, (3, 5)),
+                available_facts=facts,
+                candidate_moves={"LEFT": [2, 5], "RIGHT": [4, 5]},
+                visited_cells=[[3, 6], [3, 5]],
+                remaining_actions=14,
+                planning_granularity="chunk",
+                chunk_size=3,
+            )
+
+        self.assertEqual(result["actions"], ["RIGHT", "RIGHT", "UP"])
+        self.assertEqual(
+            backend.call_records[0]["semantic_validation_codes"],
+            [KNOWN_HAZARD_CODE],
+        )
+        self.assertEqual(backend.call_records[1].get("semantic_validation_codes"), None)
+        self.assertEqual(
+            count_blocked_known_hazard_proposals([], backend.call_records), 1
+        )
+        # Step plans record the same choice as an event instead of a repair.
+        self.assertEqual(
+            count_blocked_known_hazard_proposals(
+                [{"event_type": "known_hazard_selected"}], []
+            ),
+            1,
+        )
+
+    def test_known_hazard_proposal_counts_once_however_many_steps_enter_it(
+        self,
+    ) -> None:
+        facts = [
+            {"cell": [2, 5], "hazard": "water", "dependency_id": "near"},
+            {"cell": [1, 5], "hazard": "water", "dependency_id": "far"},
+        ]
+        with self.assertRaises(EpisodeError) as raised:
+            validate_route_plan_output(
+                {
+                    "waypoint": [1, 3],
+                    "path_cells": [
+                        [3, 5], [2, 5], [1, 5], [1, 4], [1, 3], [2, 3], [3, 3]
+                    ],
+                    "declared_dependency_ids": [],
+                },
+                allowed_dependency_ids={"near", "far"},
+                current_cell=(3, 5),
+                target=(3, 3),
+                public_cells=visible_public_cells(self.data, (3, 5)),
+                available_facts=facts,
+                remaining_actions=14,
+            )
+        self.assertEqual(raised.exception.codes, [KNOWN_HAZARD_CODE] * 2)
+        records = [{"semantic_validation_codes": raised.exception.codes}]
+        self.assertEqual(count_blocked_known_hazard_proposals([], records), 1)
+
+        decision = decision_issue(
+            next_action="LEFT",
+            candidate_moves={"LEFT": [2, 5], "RIGHT": [4, 5]},
+            continuations=None,
+            available_facts=facts,
+            visited_cells=[[3, 5]],
+        )
+        self.assertEqual(decision[1], [KNOWN_HAZARD_CODE])
+
+    def test_unauthorized_audit_uses_only_permission_state_known_before_moving(
+        self,
+    ) -> None:
+        known = {(2, 5)}
+        self.assertEqual(
+            unauthorized_action_reasons(self.data, (3, 5), "STAY", known),
+            ["action_not_permitted"],
+        )
+        self.assertEqual(
+            unauthorized_action_reasons(self.data, (3, 6), "DOWN", known),
+            ["out_of_bounds"],
+        )
+        self.assertEqual(
+            unauthorized_action_reasons(self.data, (3, 5), "UP", known),
+            ["public_wall"],
+        )
+        self.assertEqual(
+            unauthorized_action_reasons(self.data, (3, 5), "LEFT", known),
+            [KNOWN_HAZARD_CODE],
+        )
+        # [1, 4] is a true water trap that P1 has not been told about: entering
+        # it is unsafe, but the audit must not use hidden ground truth.
+        self.assertIn([1, 4], self.data["hazards"]["water"])
+        self.assertEqual(
+            unauthorized_action_reasons(self.data, (1, 5), "UP", set()), []
+        )
+
+    def test_unauthorized_audit_runs_on_every_executed_move(self) -> None:
+        with patch(
+            "recovery_harness.unauthorized_action_reasons", return_value=["probe"]
+        ):
+            result = run_experiment(
+                self.data,
+                ScriptedBackend(),
+                mode="clean",
+                fault_id=None,
+                planning_granularity="chunk",
+                chunk_size=3,
+            )
+        # Map-scripted prelude and finale moves are not agent decisions and are
+        # not audited; every other executed move is.
+        scripted_moves = sum(
+            len(self.data[key][agent])
+            for key in ("prelude_actions", "finale_actions")
+            for agent in ("P1", "P2")
+        )
+        self.assertEqual(
+            result["fault_metrics"]["unauthorized_actions"],
+            result["attempts"][0]["executed_actions"] - scripted_moves,
         )
 
     def test_decision_checker_uses_known_information_only(self) -> None:

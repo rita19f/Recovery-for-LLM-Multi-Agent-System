@@ -85,7 +85,7 @@ Run one experiment:
 python scripts/run_experiment.py maps/evaluation/e1_pocket_crossing.json \
   --backend llm --mode full-restart --fault a-fire-sword-1-monster-decoy \
   --planning-granularity chunk --chunk-size 3 \
-  --detection-trigger after-fault-caused-harm --recovery-scope agent-only
+  --detection-trigger after-fault-linked-harm --recovery-scope agent-only
 ```
 
 Run the declared three-repetition formal batch directly, resume it if it is
@@ -111,9 +111,13 @@ python scripts/serve_viewer.py --port 8765   # open http://127.0.0.1:8765
 ## Main metrics
 
 - goal success and safe (full-health) success;
-- the fault propagation funnel: delivered, used in a plan, executed, harm,
-  failure;
+- the fault propagation funnel: delivered, used in a plan, executed, linked
+  harm, linked failure ("linked" is an operational attribution through the
+  corrupted message, plan, and action, not a counterfactual claim);
 - LLM calls, tokens, latency, executed actions, and messages;
+- unauthorized actions (an audited invariant, zero by construction), blocked
+  known-hazard proposals, true-world unsafe entries, and the fault-linked
+  subset of those entries;
 - wasted work discarded by a restart and damage that a restart cannot undo;
 - verifier accuracy and cost.
 

@@ -127,7 +127,7 @@ def main() -> int:
             "delay",
             "after-fault-consumption",
             "after-first-world-mutation",
-            "after-fault-caused-harm",
+            "after-fault-linked-harm",
             "outcome",
         ),
         default="delay",

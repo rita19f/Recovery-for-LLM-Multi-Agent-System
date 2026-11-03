@@ -1024,7 +1024,7 @@ def restart_checks(data: dict[str, Any], faults: list[dict[str, Any]]) -> str | 
     for fault in faults:
         if fault["kind"] == "omission":
             continue
-        for trigger in ("delay", "after-fault-caused-harm"):
+        for trigger in ("delay", "after-fault-linked-harm"):
             result = run_experiment(
                 data,
                 ScriptedBackend(),

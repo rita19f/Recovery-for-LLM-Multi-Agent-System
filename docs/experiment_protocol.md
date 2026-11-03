@@ -30,22 +30,39 @@ held-out LLM outcomes. The precommitted evaluation matrix is
 
 ## Evaluation matrix
 
-`configs/evaluation_batch.json` declares 61 conditions with three repetitions
-(183 runs). Every formal restart uses `recovery_scope: agent-only`: agent-local
+`configs/evaluation_batch.json` declares 57 conditions with three repetitions
+(171 runs). Every formal restart uses `recovery_scope: agent-only`: agent-local
 messages, memory, and plans are reset while the detection-time physical world
 is preserved. Its paired no-recovery outcome comes from the same faulty
 trajectory.
 
-- Basic maps: clean; full restart with immediate detection for the accidental,
-  adversarial, and irrelevant faults; trusted-source oracle verification for
-  the two relevant faults; LLM verification for the two relevant faults on
-  `b1_three_lane_detours` only.
-- Extended maps: clean; full restart with detection after fault-caused harm
-  for faults that actually cause damage; full restart with immediate detection
-  for all three faults. The accidental fault on `e3_guarded_doors` is retained
-  as a plan-relevant, non-executed case and therefore has no after-harm
-  condition. Immediate versus after-harm detection contrasts a restart that
-  precedes irreversible damage with one that follows it.
+- All ten maps: clean; full restart with immediate detection for the
+  accidental, adversarial, and irrelevant faults. These runs, with their paired
+  no-recovery trajectories, are the propagation and restart baseline.
+- Extended maps: full restart with detection after fault-linked harm for faults
+  that actually cause damage. The accidental fault on `e3_guarded_doors` is
+  retained as a plan-relevant, non-executed case and therefore has no
+  after-harm condition. Immediate versus after-harm detection contrasts a
+  restart that precedes irreversible damage with one that follows it.
+- Verification: trusted-source oracle verification and LLM verification on
+  exactly the same map-fault combinations, the two relevant faults on
+  `b1_three_lane_detours` and `e1_pocket_crossing` (the basic and extended
+  base cases), so the two verifiers are compared without a map-difficulty
+  confound. This is a matched case study, not a suite-level claim.
+
+Verification is compared on B1 and E1 with the existing conditions for the
+same map-fault combinations, as follows:
+
+- harm prevented: verification versus the paired no-recovery trajectory,
+  where the fault reaches an unsafe action;
+- cost: verification versus full restart with immediate detection. Detection
+  then precedes any action, so both avoid harm and differ only in calls,
+  tokens, and latency;
+- prevention versus recovery under persistent state (E1 only): verification
+  versus full restart after fault-linked harm, which cannot undo damage;
+- LLM verifier quality: true and false positives and negatives against the
+  oracle, reported as raw message counts. With three repetitions there are
+  only a few faulty messages, so these numbers are exploratory.
 
 Before spending quota, rehearse the whole matrix with the dry-run backend,
 which uses scripted decisions but builds every real prompt:
@@ -57,7 +74,7 @@ python3 scripts/run_batch.py configs/evaluation_batch.json \
 
 Detection timing is a controlled experimental factor, not an automated
 detector. Persistent-state comparisons should use a semantic event boundary
-such as `after-fault-caused-harm`; a fixed tick is not a reliable substitute
+such as `after-fault-linked-harm`; a fixed tick is not a reliable substitute
 when different LLM trajectories reach the same event at different times.
 If the requested event never occurs, detection falls back to the episode
 outcome and `detection.trigger_observed` is false. Report the trigger rate
@@ -69,11 +86,27 @@ over all pairs and over pairs in which the trigger was observed.
 - clean and recovered joint success;
 - trap entries and other unsafe actions;
 - fault injection, delivery, planner exposure, structured route relevance,
-  executed harm, and caused failure;
+  executed action, linked harm, and linked failure. "Linked" is an operational
+  attribution: the fault reached a plan through a corrupted message, and an
+  action executed from that plan entered the fault's relevance cell. It is not
+  a counterfactual causal claim;
 - declared versus actual injection phase/tick, requested detection trigger,
   observed detection reason, and tick delay;
-- affected workflow stages, blocked unsafe-action attempts, and executed
-  unauthorized actions;
+- affected workflow stages;
+- unauthorized and unsafe actions, as four counts. Agents can only move:
+  - `unauthorized_actions`: executed moves that violate the permission state
+    known before they run (not one of the four moves, out of bounds, a public
+    wall, or a trap in the agent's own facts, including corrupted partner
+    reports). Every executed move is audited; validation and queue checks keep
+    this at zero, so it is a checked invariant of the environment, not a
+    finding. Hidden traps are not used, and entering a known live monster
+    without its weapon is a permitted move that costs HP;
+  - `blocked_known_hazard_proposals`: plans that proposed entering a known
+    trap and were rejected, counted once per proposal and never executed;
+  - `true_world_unsafe_entries`: executed entries into a true trap or into a
+    live monster without its weapon, judged against the true world;
+  - `fault_linked_unsafe_entries`: the subset of those entries linked to the
+    injected fault, so it never exceeds `true_world_unsafe_entries`;
 - plan-level dependency TP/FP/FN/TN;
 - LLM calls and prompt/completion tokens;
 - verifier TP/FP/FN/TN, calls, tokens, and latency;

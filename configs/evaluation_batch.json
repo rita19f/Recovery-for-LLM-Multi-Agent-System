@@ -83,18 +83,6 @@
       "fault": "f-water-stage-1-drop-once"
     },
     {
-      "id": "b2-oracle-verify-accidental",
-      "map": "maps/evaluation/b2_corner_swap.json",
-      "mode": "always-verify",
-      "fault": "f-water-stage-1-offset"
-    },
-    {
-      "id": "b2-oracle-verify-adversarial",
-      "map": "maps/evaluation/b2_corner_swap.json",
-      "mode": "always-verify",
-      "fault": "a-fire-stage-1-decoy"
-    },
-    {
       "id": "b3-clean",
       "map": "maps/evaluation/b3_zigzag_exchange.json",
       "mode": "clean"
@@ -116,18 +104,6 @@
       "map": "maps/evaluation/b3_zigzag_exchange.json",
       "mode": "full-restart",
       "fault": "f-water-stage-1-drop-once"
-    },
-    {
-      "id": "b3-oracle-verify-accidental",
-      "map": "maps/evaluation/b3_zigzag_exchange.json",
-      "mode": "always-verify",
-      "fault": "f-fire-stage-1-offset"
-    },
-    {
-      "id": "b3-oracle-verify-adversarial",
-      "map": "maps/evaluation/b3_zigzag_exchange.json",
-      "mode": "always-verify",
-      "fault": "a-fire-stage-1-decoy"
     },
     {
       "id": "b4-clean",
@@ -153,18 +129,6 @@
       "fault": "f-water-stage-1-drop-once"
     },
     {
-      "id": "b4-oracle-verify-accidental",
-      "map": "maps/evaluation/b4_ladder_exchange.json",
-      "mode": "always-verify",
-      "fault": "f-water-stage-1-offset"
-    },
-    {
-      "id": "b4-oracle-verify-adversarial",
-      "map": "maps/evaluation/b4_ladder_exchange.json",
-      "mode": "always-verify",
-      "fault": "a-fire-stage-1-decoy"
-    },
-    {
       "id": "b5-clean",
       "map": "maps/evaluation/b5_staged_relay.json",
       "mode": "clean"
@@ -188,18 +152,6 @@
       "fault": "f-water-stage-1-drop-once"
     },
     {
-      "id": "b5-oracle-verify-accidental",
-      "map": "maps/evaluation/b5_staged_relay.json",
-      "mode": "always-verify",
-      "fault": "f-water-stage-1-offset"
-    },
-    {
-      "id": "b5-oracle-verify-adversarial",
-      "map": "maps/evaluation/b5_staged_relay.json",
-      "mode": "always-verify",
-      "fault": "a-fire-stage-1-decoy"
-    },
-    {
       "id": "e1-clean",
       "map": "maps/evaluation/e1_pocket_crossing.json",
       "mode": "clean"
@@ -209,14 +161,14 @@
       "map": "maps/evaluation/e1_pocket_crossing.json",
       "mode": "full-restart",
       "fault": "f-ice-sword-1-offset",
-      "detection_trigger": "after-fault-caused-harm"
+      "detection_trigger": "after-fault-linked-harm"
     },
     {
       "id": "e1-restart-adversarial-after-harm",
       "map": "maps/evaluation/e1_pocket_crossing.json",
       "mode": "full-restart",
       "fault": "a-fire-sword-1-monster-decoy",
-      "detection_trigger": "after-fault-caused-harm"
+      "detection_trigger": "after-fault-linked-harm"
     },
     {
       "id": "e1-restart-accidental-immediate",
@@ -237,6 +189,30 @@
       "fault": "f-fire-sword-1-drop-once"
     },
     {
+      "id": "e1-oracle-verify-accidental",
+      "map": "maps/evaluation/e1_pocket_crossing.json",
+      "mode": "always-verify",
+      "fault": "f-ice-sword-1-offset"
+    },
+    {
+      "id": "e1-oracle-verify-adversarial",
+      "map": "maps/evaluation/e1_pocket_crossing.json",
+      "mode": "always-verify",
+      "fault": "a-fire-sword-1-monster-decoy"
+    },
+    {
+      "id": "e1-llm-verify-accidental",
+      "map": "maps/evaluation/e1_pocket_crossing.json",
+      "mode": "llm-verify",
+      "fault": "f-ice-sword-1-offset"
+    },
+    {
+      "id": "e1-llm-verify-adversarial",
+      "map": "maps/evaluation/e1_pocket_crossing.json",
+      "mode": "llm-verify",
+      "fault": "a-fire-sword-1-monster-decoy"
+    },
+    {
       "id": "e2-clean",
       "map": "maps/evaluation/e2_shared_start_split.json",
       "mode": "clean"
@@ -246,14 +222,14 @@
       "map": "maps/evaluation/e2_shared_start_split.json",
       "mode": "full-restart",
       "fault": "f-ice-sword-1-offset",
-      "detection_trigger": "after-fault-caused-harm"
+      "detection_trigger": "after-fault-linked-harm"
     },
     {
       "id": "e2-restart-adversarial-after-harm",
       "map": "maps/evaluation/e2_shared_start_split.json",
       "mode": "full-restart",
       "fault": "a-fire-sword-1-monster-decoy",
-      "detection_trigger": "after-fault-caused-harm"
+      "detection_trigger": "after-fault-linked-harm"
     },
     {
       "id": "e2-restart-accidental-immediate",
@@ -283,7 +259,7 @@
       "map": "maps/evaluation/e3_guarded_doors.json",
       "mode": "full-restart",
       "fault": "a-fire-sword-1-monster-decoy",
-      "detection_trigger": "after-fault-caused-harm"
+      "detection_trigger": "after-fault-linked-harm"
     },
     {
       "id": "e3-restart-accidental-immediate",
@@ -313,14 +289,14 @@
       "map": "maps/evaluation/e4_ladder_relay.json",
       "mode": "full-restart",
       "fault": "f-fire-sword-1-offset",
-      "detection_trigger": "after-fault-caused-harm"
+      "detection_trigger": "after-fault-linked-harm"
     },
     {
       "id": "e4-restart-adversarial-after-harm",
       "map": "maps/evaluation/e4_ladder_relay.json",
       "mode": "full-restart",
       "fault": "a-ice-sword-1-monster-decoy",
-      "detection_trigger": "after-fault-caused-harm"
+      "detection_trigger": "after-fault-linked-harm"
     },
     {
       "id": "e4-restart-accidental-immediate",
@@ -350,14 +326,14 @@
       "map": "maps/evaluation/e5_double_gate.json",
       "mode": "full-restart",
       "fault": "f-ice-sword-2-offset",
-      "detection_trigger": "after-fault-caused-harm"
+      "detection_trigger": "after-fault-linked-harm"
     },
     {
       "id": "e5-restart-adversarial-after-harm",
       "map": "maps/evaluation/e5_double_gate.json",
       "mode": "full-restart",
       "fault": "a-fire-sword-1-monster-decoy",
-      "detection_trigger": "after-fault-caused-harm"
+      "detection_trigger": "after-fault-linked-harm"
     },
     {
       "id": "e5-restart-accidental-immediate",

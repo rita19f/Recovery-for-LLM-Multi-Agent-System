@@ -153,15 +153,38 @@ class EvaluationMapTest(unittest.TestCase):
             for name, data in self.maps.items()
         }
         for condition in manifest["runs"]:
-            if condition.get("detection_trigger") != "after-fault-caused-harm":
+            if condition.get("detection_trigger") != "after-fault-linked-harm":
                 continue
             map_name = Path(condition["map"]).name
             with self.subTest(condition=condition["id"]):
                 fault_check = preflights[map_name][condition["fault"]]
                 self.assertTrue(
-                    fault_check["fault_caused_harm"],
+                    fault_check["fault_linked_harm"],
                     "after-harm conditions must use a fault that reaches the harm event",
                 )
+
+    def test_verification_covers_both_relevant_faults_on_declared_maps(self) -> None:
+        manifest = json.loads(EVALUATION_MANIFEST.read_text())
+        # Oracle and LLM verification use exactly the same map-fault
+        # combinations (the basic and extended base cases), so the verifiers
+        # are compared without a map-difficulty confound.
+        matched = {"b1_three_lane_detours.json", "e1_pocket_crossing.json"}
+        expected = {"always-verify": matched, "llm-verify": matched}
+        for mode, map_names in expected.items():
+            with self.subTest(mode=mode):
+                covered: dict[str, set[str]] = {}
+                for condition in manifest["runs"]:
+                    if condition["mode"] == mode:
+                        name = Path(condition["map"]).name
+                        covered.setdefault(name, set()).add(condition["fault"])
+                self.assertEqual(set(covered), map_names)
+                for name, faults in covered.items():
+                    relevant = {
+                        fault["id"]
+                        for fault in self.maps[name]["faults"]
+                        if fault["kind"] != "omission"
+                    }
+                    self.assertEqual(faults, relevant, name)
 
     def test_formal_restart_baseline_preserves_the_physical_environment(self) -> None:
         manifest = json.loads(EVALUATION_MANIFEST.read_text())

@@ -16,6 +16,7 @@ results/summaries/*
 !results/summaries/condition_summary.csv
 !results/summaries/paired_recovery.csv
 !results/summaries/paired_condition_summary.csv
+!results/summaries/paired_condition_summary_trigger_observed.csv
 !results/summaries/failure_summary.csv
 !results/summaries/evaluation_summary.json
 !results/summaries/dependency_precision_recall.pdf
