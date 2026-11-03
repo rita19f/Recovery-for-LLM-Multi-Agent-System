@@ -21,3 +21,6 @@ results/summaries/*
 !results/summaries/evaluation_summary.json
 !results/summaries/dependency_precision_recall.pdf
 !results/summaries/dependency_precision_recall.png
+
+# Generated candidate maps that are not part of the formal evaluation.
+maps/candidates/

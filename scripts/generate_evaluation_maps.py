@@ -154,37 +154,6 @@ B2 = Template(
     report_stages=(0,),
 )
 
-B3 = Template(
-    name="b3-zigzag-exchange",
-    suite="basic",
-    size_class="small",
-    role="separate starts; cross to the partner's side and back in two stages",
-    rows=(
-        "#########",
-        "#.......#",
-        "#.#.#.#.#",
-        "#.......#",
-        "#.#.#.#.#",
-        "#.......#",
-        "#########",
-    ),
-    starts={"P1": (1, 5), "P2": (7, 5)},
-    stages=({"P1": (7, 3), "P2": (1, 3)}, {"P1": (1, 1), "P2": (7, 1)}),
-    slot_groups=(
-        SlotGroup(
-            "fire",
-            ((1, 4), (3, 4), (5, 4), (7, 4), (1, 2), (3, 2), (5, 2), (7, 2)),
-            2,
-        ),
-        SlotGroup(
-            "water",
-            ((1, 4), (3, 4), (5, 4), (7, 4), (1, 2), (3, 2), (5, 2), (7, 2)),
-            2,
-        ),
-    ),
-    report_stages=(0, 1),
-)
-
 _LEFT_LADDER_9 = ((1, 2), (3, 2), (1, 4), (3, 4), (1, 6), (3, 6))
 _RIGHT_LADDER_9 = ((5, 2), (7, 2), (5, 4), (7, 4), (5, 6), (7, 6))
 
@@ -217,39 +186,6 @@ B4 = Template(
     report_stages=(1,),
 )
 
-B5 = Template(
-    name="b5-staged-relay",
-    suite="basic",
-    size_class="large",
-    role="three stages: descend, exchange through a shared zone, climb the "
-    "partner's ladder; the longest restart prefix",
-    rows=(
-        "###########",
-        "#...###...#",
-        "#.#.###.#.#",
-        "#...###...#",
-        "#.#.###.#.#",
-        "#.........#",
-        "#.#.#.#.#.#",
-        "#.........#",
-        "###########",
-    ),
-    starts={"P1": (1, 1), "P2": (9, 1)},
-    stages=(
-        {"P1": (3, 5), "P2": (7, 5)},
-        {"P1": (7, 5), "P2": (3, 5)},
-        {"P1": (9, 1), "P2": (1, 1)},
-    ),
-    slot_groups=(
-        SlotGroup("fire", ((1, 2), (3, 2), (1, 4), (3, 4)), 2),
-        SlotGroup("water", ((7, 2), (9, 2), (7, 4), (9, 4)), 2),
-        SlotGroup("fire", ((4, 5), (5, 5), (6, 5), (5, 6)), 1),
-        SlotGroup("water", ((4, 5), (5, 5), (6, 5), (5, 6)), 1),
-    ),
-    cross_stage_faults=True,
-    report_stages=(1, 2),
-)
-
 E1 = Template(
     name="e1-pocket-crossing",
     suite="extended",
@@ -274,34 +210,6 @@ E1 = Template(
     slot_groups=(
         SlotGroup("ice_sword", ((2, 6), (4, 6), (6, 6)), 1),
         SlotGroup("fire_sword", ((2, 6), (4, 6), (6, 6)), 1),
-    ),
-)
-
-E2 = Template(
-    name="e2-shared-start-split",
-    suite="extended",
-    size_class="small",
-    role="coincident start, separate guarded goals; both agents see the "
-    "starting area, then split",
-    rows=(
-        "#.#####.#",
-        "#.......#",
-        "#.#.#.#.#",
-        "#.......#",
-        "#.#.#.#.#",
-        "#.......#",
-        "#.#.#.#.#",
-    ),
-    starts={"P1": (4, 5), "P2": (4, 5)},
-    stages=({"P1": (7, 0), "P2": (1, 0)},),
-    monsters=(
-        ("fire-monster-west", "fire_monster", (1, 1)),
-        ("ice-monster-east", "ice_monster", (7, 1)),
-    ),
-    # Inner pockets are visible from the shared start, keeping the map small.
-    slot_groups=(
-        SlotGroup("ice_sword", ((3, 6), (5, 6)), 1),
-        SlotGroup("fire_sword", ((3, 6), (5, 6)), 1),
     ),
 )
 
@@ -369,37 +277,8 @@ E4 = Template(
     hidden_monster=True,
 )
 
-E5 = Template(
-    name="e5-double-gate",
-    suite="extended",
-    size_class="medium",
-    role="each agent passes a gate monster and then a goal monster, so it "
-    "needs two single-use swords; a fault corrupts only one of four sword facts",
-    rows=(
-        "#.#######.#",
-        "#.........#",
-        "###.###.###",
-        "#.........#",
-        "#.#.#.#.#.#",
-        "#.........#",
-        "#.#.###.#.#",
-    ),
-    starts={"P1": (2, 5), "P2": (8, 5)},
-    stages=({"P1": (9, 0), "P2": (1, 0)},),
-    monsters=(
-        ("fire-monster-gate", "fire_monster", (3, 2)),
-        ("ice-monster-gate", "ice_monster", (7, 2)),
-        ("fire-monster-goal", "fire_monster", (1, 1)),
-        ("ice-monster-goal", "ice_monster", (9, 1)),
-    ),
-    slot_groups=(
-        SlotGroup("ice_sword", ((1, 6), (3, 6), (7, 6), (9, 6)), 2),
-        SlotGroup("fire_sword", ((1, 6), (3, 6), (7, 6), (9, 6)), 2),
-    ),
-)
 
-
-TEMPLATES = (B1, B2, B3, B4, B5, E1, E2, E3, E4, E5)
+TEMPLATES = (B1, B2, B4, E1, E3, E4)
 
 
 # ---------------------------------------------------------------------------

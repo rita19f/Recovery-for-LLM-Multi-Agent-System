@@ -55,11 +55,16 @@ class EvaluationMapTest(unittest.TestCase):
             for template in generator.TEMPLATES
         }
 
-    def test_suite_has_five_basic_and_five_extended_maps(self) -> None:
+    def test_suite_has_three_basic_and_three_extended_maps(self) -> None:
         self.assertEqual(set(self.maps), set(self.templates))
         suites = [data["generator"]["suite"] for data in self.maps.values()]
-        self.assertEqual(suites.count("basic"), 5)
-        self.assertEqual(suites.count("extended"), 5)
+        self.assertEqual(suites.count("basic"), 3)
+        self.assertEqual(suites.count("extended"), 3)
+        manifest = json.loads(EVALUATION_MANIFEST.read_text())
+        self.assertEqual(
+            {Path(condition["map"]).name for condition in manifest["runs"]},
+            set(self.maps),
+        )
         for data in self.maps.values():
             self.assertEqual(
                 data["schema_version"],

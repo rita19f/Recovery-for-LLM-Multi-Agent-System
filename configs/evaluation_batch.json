@@ -1,6 +1,6 @@
 {
   "name": "recovery-evaluation-v2-tritonai",
-  "description": "Frozen held-out matrix over five basic (terminal-trap) and five extended (persistent HP, single-use weapons) maps. The restart baseline resets the agent workflow while preserving the physical environment at detection.",
+  "description": "Frozen held-out matrix over three basic (terminal-trap) and three extended (persistent HP, single-use weapons) maps. The restart baseline resets the agent workflow while preserving the physical environment at detection.",
   "expected_endpoint_host": "tritonai-api.ucsd.edu",
   "expected_model": "api-glm-5.3",
   "repetitions": 3,
@@ -83,29 +83,6 @@
       "fault": "f-water-stage-1-drop-once"
     },
     {
-      "id": "b3-clean",
-      "map": "maps/evaluation/b3_zigzag_exchange.json",
-      "mode": "clean"
-    },
-    {
-      "id": "b3-restart-accidental-immediate",
-      "map": "maps/evaluation/b3_zigzag_exchange.json",
-      "mode": "full-restart",
-      "fault": "f-fire-stage-1-offset"
-    },
-    {
-      "id": "b3-restart-adversarial-immediate",
-      "map": "maps/evaluation/b3_zigzag_exchange.json",
-      "mode": "full-restart",
-      "fault": "a-fire-stage-1-decoy"
-    },
-    {
-      "id": "b3-restart-irrelevant-immediate",
-      "map": "maps/evaluation/b3_zigzag_exchange.json",
-      "mode": "full-restart",
-      "fault": "f-water-stage-1-drop-once"
-    },
-    {
       "id": "b4-clean",
       "map": "maps/evaluation/b4_ladder_exchange.json",
       "mode": "clean"
@@ -125,29 +102,6 @@
     {
       "id": "b4-restart-irrelevant-immediate",
       "map": "maps/evaluation/b4_ladder_exchange.json",
-      "mode": "full-restart",
-      "fault": "f-water-stage-1-drop-once"
-    },
-    {
-      "id": "b5-clean",
-      "map": "maps/evaluation/b5_staged_relay.json",
-      "mode": "clean"
-    },
-    {
-      "id": "b5-restart-accidental-immediate",
-      "map": "maps/evaluation/b5_staged_relay.json",
-      "mode": "full-restart",
-      "fault": "f-water-stage-1-offset"
-    },
-    {
-      "id": "b5-restart-adversarial-immediate",
-      "map": "maps/evaluation/b5_staged_relay.json",
-      "mode": "full-restart",
-      "fault": "a-fire-stage-1-decoy"
-    },
-    {
-      "id": "b5-restart-irrelevant-immediate",
-      "map": "maps/evaluation/b5_staged_relay.json",
       "mode": "full-restart",
       "fault": "f-water-stage-1-drop-once"
     },
@@ -213,43 +167,6 @@
       "fault": "a-fire-sword-1-monster-decoy"
     },
     {
-      "id": "e2-clean",
-      "map": "maps/evaluation/e2_shared_start_split.json",
-      "mode": "clean"
-    },
-    {
-      "id": "e2-restart-accidental-after-harm",
-      "map": "maps/evaluation/e2_shared_start_split.json",
-      "mode": "full-restart",
-      "fault": "f-ice-sword-1-offset",
-      "detection_trigger": "after-fault-linked-harm"
-    },
-    {
-      "id": "e2-restart-adversarial-after-harm",
-      "map": "maps/evaluation/e2_shared_start_split.json",
-      "mode": "full-restart",
-      "fault": "a-fire-sword-1-monster-decoy",
-      "detection_trigger": "after-fault-linked-harm"
-    },
-    {
-      "id": "e2-restart-accidental-immediate",
-      "map": "maps/evaluation/e2_shared_start_split.json",
-      "mode": "full-restart",
-      "fault": "f-ice-sword-1-offset"
-    },
-    {
-      "id": "e2-restart-adversarial-immediate",
-      "map": "maps/evaluation/e2_shared_start_split.json",
-      "mode": "full-restart",
-      "fault": "a-fire-sword-1-monster-decoy"
-    },
-    {
-      "id": "e2-restart-irrelevant-immediate",
-      "map": "maps/evaluation/e2_shared_start_split.json",
-      "mode": "full-restart",
-      "fault": "f-fire-sword-1-drop-once"
-    },
-    {
       "id": "e3-clean",
       "map": "maps/evaluation/e3_guarded_doors.json",
       "mode": "clean"
@@ -313,43 +230,6 @@
     {
       "id": "e4-restart-irrelevant-immediate",
       "map": "maps/evaluation/e4_ladder_relay.json",
-      "mode": "full-restart",
-      "fault": "f-fire-sword-1-drop-once"
-    },
-    {
-      "id": "e5-clean",
-      "map": "maps/evaluation/e5_double_gate.json",
-      "mode": "clean"
-    },
-    {
-      "id": "e5-restart-accidental-after-harm",
-      "map": "maps/evaluation/e5_double_gate.json",
-      "mode": "full-restart",
-      "fault": "f-ice-sword-2-offset",
-      "detection_trigger": "after-fault-linked-harm"
-    },
-    {
-      "id": "e5-restart-adversarial-after-harm",
-      "map": "maps/evaluation/e5_double_gate.json",
-      "mode": "full-restart",
-      "fault": "a-fire-sword-1-monster-decoy",
-      "detection_trigger": "after-fault-linked-harm"
-    },
-    {
-      "id": "e5-restart-accidental-immediate",
-      "map": "maps/evaluation/e5_double_gate.json",
-      "mode": "full-restart",
-      "fault": "f-ice-sword-2-offset"
-    },
-    {
-      "id": "e5-restart-adversarial-immediate",
-      "map": "maps/evaluation/e5_double_gate.json",
-      "mode": "full-restart",
-      "fault": "a-fire-sword-1-monster-decoy"
-    },
-    {
-      "id": "e5-restart-irrelevant-immediate",
-      "map": "maps/evaluation/e5_double_gate.json",
       "mode": "full-restart",
       "fault": "f-fire-sword-1-drop-once"
     }

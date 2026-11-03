@@ -44,7 +44,7 @@ A full environment reset is available as a development-only oracle
 ```text
 configs/    batch manifests (configs/evaluation_batch.json is the formal matrix)
 docs/       experiment protocol
-maps/       development maps and the ten generated evaluation maps
+maps/       development maps and the six generated evaluation maps
 scripts/    harness, runners, map generator, aggregation, viewer server
 tests/      deterministic tests (no LLM calls)
 viewer/     browser replay of runs
