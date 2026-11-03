@@ -88,15 +88,17 @@ python scripts/run_experiment.py maps/evaluation/e1_pocket_crossing.json \
   --detection-trigger after-fault-caused-harm --recovery-scope agent-only
 ```
 
-Run the formal batch (one repetition first, then all three), resume it if it is
-interrupted, and aggregate the results:
+Run the declared three-repetition formal batch directly, resume it if it is
+interrupted, and aggregate the results. The output path below is explicit so
+the same batch can be resumed without guessing a generated directory name:
 
 ```bash
-python scripts/run_batch.py configs/evaluation_batch.json --backend llm --repetitions 1 --execute
-python scripts/run_batch.py configs/evaluation_batch.json --backend llm --execute
-python scripts/run_batch.py configs/evaluation_batch.json --backend llm --execute \
-  --resume results/batches/BATCH_NAME
-python scripts/aggregate_results.py results/batches/BATCH_NAME/batch-summary.json \
+python scripts/run_batch.py configs/evaluation_batch.json \
+  --backend llm --output-root results/batches/formal-agent-only-v1 --execute
+python scripts/run_batch.py configs/evaluation_batch.json \
+  --backend llm --resume results/batches/formal-agent-only-v1 --execute
+python scripts/aggregate_results.py \
+  results/batches/formal-agent-only-v1/batch-summary.json \
   --output results/summaries
 ```
 
