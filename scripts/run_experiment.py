@@ -121,6 +121,32 @@ def main() -> int:
             "first records outcome-time detection"
         ),
     )
+    parser.add_argument(
+        "--detection-trigger",
+        choices=(
+            "delay",
+            "after-fault-consumption",
+            "after-first-world-mutation",
+            "after-fault-caused-harm",
+            "outcome",
+        ),
+        default="delay",
+        help=(
+            "logical detection boundary; event triggers avoid using scheduler ticks "
+            "as a proxy for fault consumption, world mutation, or harm"
+        ),
+    )
+    parser.add_argument(
+        "--recovery-scope",
+        choices=("environment-reset", "agent-only", "both"),
+        default="environment-reset",
+        help=(
+            "full-restart scope: environment-reset restores the complete simulator; "
+            "agent-only clears agent memory/plans but preserves detection-time "
+            "positions, HP, inventory, and shared objects; both forks the two "
+            "restarts from the same detection snapshot"
+        ),
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--validate-only", action="store_true")
@@ -185,6 +211,8 @@ def main() -> int:
         "planning_granularity": args.planning_granularity,
         "chunk_size": args.chunk_size,
         "detection_delay_ticks": args.detection_delay_ticks,
+        "detection_trigger": args.detection_trigger,
+        "recovery_scope": args.recovery_scope,
         "model": os.environ.get("LLM_MODEL") if args.backend == "llm" else None,
         "reasoning_effort": (
             os.environ.get("LLM_REASONING_EFFORT", "none")
@@ -211,6 +239,8 @@ def main() -> int:
             planning_granularity=args.planning_granularity,
             chunk_size=args.chunk_size,
             detection_delay_ticks=args.detection_delay_ticks,
+            detection_trigger=args.detection_trigger,
+            recovery_scope=args.recovery_scope,
         )
         write_run(output_dir, config, result)
     except (EpisodeError, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -261,16 +291,42 @@ def main() -> int:
                 "planning_granularity": result["planning_granularity"],
                 "chunk_size": result["chunk_size"],
                 "detection_delay_ticks": result["detection_delay_ticks"],
+                "detection_trigger": result["detection_trigger"],
+                "recovery_scope": result["recovery_scope"],
+                "recovery_scopes": result["recovery_scopes"],
+                "scope_outcome_available": result["scope_outcome_available"],
                 "initial_success": result["initial_success"],
+                "initial_full_health_success": result[
+                    "initial_full_health_success"
+                ],
                 "final_success": result["final_success"],
                 "recovered_success": result["recovered_success"],
+                "recovery_completed_successfully": result[
+                    "recovery_completed_successfully"
+                ],
+                "recovery_improved_goal_outcome": result[
+                    "recovery_improved_goal_outcome"
+                ],
+                "recovery_improved_safe_outcome": result[
+                    "recovery_improved_safe_outcome"
+                ],
                 "clean_episode_success": result["clean_episode_success"],
+                "full_health_success": result["full_health_success"],
                 "ever_failed": result["ever_failed"],
                 "attempt_count": result["attempt_count"],
                 "executed_actions": result["executed_actions"],
                 "message_count": result["message_count"],
                 "trap_entries": result["trap_entries"],
+                "damage_taken": result["damage_taken"],
+                "irreversible_damage": result["irreversible_damage"],
+                "weapon_pickups": result["weapon_pickups"],
+                "monsters_defeated": result["monsters_defeated"],
+                "final_health": result["final_health"],
+                "final_inventory": result["final_inventory"],
+                "alive_monster_ids": result["alive_monster_ids"],
                 "safety_violations": result["safety_violations"],
+                "actual_harness_work": result["actual_harness_work"],
+                "outcome_path": result["outcome_path"],
                 "fault_metrics": result["fault_metrics"],
                 "dependency_quality": result["dependency_quality"],
                 "verification_checks": result["verification_checks"],
@@ -283,6 +339,10 @@ def main() -> int:
                 "recovery_triggered": result["recovery_triggered"],
                 "backend_calls": result["backend_calls"],
                 "llm_calls": result["llm_calls"],
+                "plan_repair_calls": result["plan_repair_calls"],
+                "semantic_validation_failures": result[
+                    "semantic_validation_failures"
+                ],
                 "usage": result["usage"],
                 "latency_ms": result["latency_ms"],
             },

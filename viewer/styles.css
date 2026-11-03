@@ -13,6 +13,8 @@
   --p2-soft: color-mix(in srgb, var(--p2) 18%, transparent);
   --fire: #df4e45;
   --water: #2b91c8;
+  --ice: #567fda;
+  --monster: #8b4f31;
   --success: #2e9a67;
   --danger: #d54b4b;
   --shadow: 0 12px 36px light-dark(rgba(25, 35, 45, .08), rgba(0, 0, 0, .22));
@@ -157,10 +159,72 @@ select { min-height: 38px; padding: 0 34px 0 10px; }
 .cell.trap-triggered { box-shadow: inset 0 0 0 3px var(--danger); }
 .cell.current-visible.trap-triggered { box-shadow: inset 0 0 0 3px var(--danger), inset 0 0 0 5px color-mix(in srgb, var(--success) 42%, transparent); }
 .fog-mark { font-size: 10px; opacity: .65; }
-.hazard { position: absolute; top: 4px; right: 5px; font-size: 11px; font-weight: 800; }
-.hazard.fire { color: var(--fire); }
-.hazard.water { color: var(--water); }
-.hazard.reported { padding: 1px 2px; border: 1px dashed currentColor; border-radius: 3px; line-height: 1; }
+.pixel-icon {
+  display: block;
+  width: 25px;
+  height: 25px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .28));
+}
+.hazard-icon {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  z-index: 1;
+}
+.hazard-icon.reported,
+.world-object.reported {
+  border: 1px dashed #8f6bd6;
+  border-radius: 5px;
+  background: color-mix(in srgb, #8f6bd6 9%, var(--surface));
+}
+.hazard-icon.faulty,
+.world-object.faulty {
+  outline: 2px dashed var(--danger);
+  outline-offset: 1px;
+}
+.object-stack {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  z-index: 1;
+}
+.cell.occupied .object-stack { right: 1px; bottom: 1px; transform: scale(.72); transform-origin: bottom right; }
+.world-object {
+  position: relative;
+  width: 29px;
+  height: 29px;
+  display: grid;
+  place-items: center;
+  padding: 1px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+}
+.fact-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #8f6bd6;
+  color: white;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .28);
+}
 .cell.faulty-belief { outline: 2px dashed var(--danger); outline-offset: -3px; }
 .agent-marker {
   width: clamp(16px, 3vw, 28px);
@@ -174,21 +238,35 @@ select { min-height: 38px; padding: 0 34px 0 10px; }
   box-shadow: 0 2px 8px rgba(0,0,0,.22);
   z-index: 2;
 }
-.agent-stack { display: flex; align-items: center; justify-content: center; gap: 3px; z-index: 2; }
+.agent-token { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; z-index: 4; }
+.health-hearts {
+  height: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin-bottom: 1px;
+  z-index: 3;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .28));
+}
+.heart-icon { width: 9px; height: 8px; image-rendering: pixelated; image-rendering: crisp-edges; }
+.agent-stack { position: relative; display: flex; align-items: flex-end; justify-content: center; gap: 3px; z-index: 4; }
 .agent-stack .agent-marker { width: clamp(15px, 2.5vw, 26px); height: clamp(15px, 2.5vw, 26px); }
 .agent-marker.p1 { background: var(--p1); }
 .agent-marker.p2 { background: var(--p2); }
 .endpoint-label { position: absolute; left: 4px; top: 3px; color: var(--text); font-size: 9px; font-weight: 800; }
+.goal-flags { position: absolute; top: 3px; right: 3px; display: flex; align-items: flex-start; gap: 1px; z-index: 1; }
+.goal-flag { width: 20px; height: 20px; image-rendering: pixelated; image-rendering: crisp-edges; filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .22)); }
 .trail-index { position: absolute; left: 5px; bottom: 3px; color: var(--muted); font-size: 9px; font-weight: 500; }
 .position { text-align: center; margin: 9px 0 0; }
 
 .legend { flex-wrap: wrap; gap: 15px; margin-top: 16px; color: var(--muted); font-size: 12px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 14px; height: 14px; display: inline-grid; place-items: center; border-radius: 4px; font-style: normal; font-size: 10px; font-weight: 800; }
+.legend-pixel-icon { width: 21px; height: 21px; image-rendering: pixelated; image-rendering: crisp-edges; }
+.legend-goal-icon { width: 18px; height: 18px; image-rendering: pixelated; image-rendering: crisp-edges; }
 .legend-agent.p1 { background: var(--p1); }
 .legend-agent.p2 { background: var(--p2); }
-.legend-fire { color: var(--fire); background: color-mix(in srgb, var(--fire) 13%, transparent); }
-.legend-water { color: var(--water); background: color-mix(in srgb, var(--water) 13%, transparent); }
 .legend-wall { background: var(--wall); }
 .legend-fog { color: var(--muted); background: light-dark(#dfe4e8, #252b32); }
 .legend-visible { background: var(--surface-2); border: 2px solid color-mix(in srgb, var(--success) 55%, transparent); }

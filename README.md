@@ -1,285 +1,120 @@
 # Safe Recovery for LLM Multi-Agent Workflows
 
-This repository studies how a multi-agent workflow should recover after a
-known message artifact is found to be faulty. Two LLM-controlled agents move in
-one partially observable grid: P1 detects fire, P2 detects water, and both must
-communicate private hazard observations to reach their goals safely.
+This repository studies what happens when a message passed between LLM agents
+is wrong, and how expensive and how safe it is to recover from it.
 
-The main systems question is whether artifact dependencies can support safe
-reuse while avoiding the cost of restarting the complete workflow.
+Two LLM agents move through a shared, partially observable grid. They have
+complementary private sensors (P1 senses fire, P2 senses water), so each agent
+needs facts reported by its partner to reach its goal safely. The harness
+injects faults into these structured messages, measures whether they propagate
+into plans, unsafe actions, and failures, and compares recovery baselines.
 
-## Current scope
+## Workloads
 
-The current implementation provides:
+- **Basic maps**: fire and water traps are terminal, so reaching the goal and
+  reaching it safely are the same.
+- **Extended maps**: agents have 3 HP. Monsters cost one HP per unarmed entry,
+  and single-use swords defeat them. An agent can carry only the sword type its
+  partner senses, so every sword must be learned from a partner report. Damage,
+  pickups, and defeated monsters are persistent world state.
 
-- clean and fault-injected shared-world execution;
-- accidental and adversarial structured message faults;
-- no-recovery, full-restart, trusted-source oracle verification, and LLM
-  verification baselines;
-- controlled detection timing;
-- append-only observations, messages, plans, actions, and dependency metadata;
-- paired no-recovery/full-restart accounting from the same faulty trajectory;
-- calls, tokens, latency, safety, propagation, and dependency-quality metrics;
-- deterministic preflight checks, unit tests, and an interactive trace viewer.
+Each agent observes a local area, sends newly sensed facts to its partner,
+plans a short chunk of moves, and executes one move per tick.
 
-Checkpoint restart and selective recovery are not yet implemented. They are the
-next recovery mechanisms to compare against the existing baselines.
+## Faults and baselines
+
+Each evaluation map has three precommitted faults: an accidental coordinate
+offset, an adversarial route decoy, and an irrelevant one-time omission.
+
+| Baseline | Meaning |
+| --- | --- |
+| Clean | no fault |
+| No recovery | the faulty run continues to the end |
+| Full restart | after detection, all agent memory, messages, and plans are cleared; the physical world (positions, HP, items) is kept |
+| Always verify | every message is checked against the trusted source facts (oracle upper bound) |
+| LLM verify | an extra LLM call checks each message against the trusted facts |
+
+No recovery and full restart share the same faulty prefix, so they are compared
+pairwise. Detection is either immediate or after the fault first causes harm.
+A full environment reset is available as a development-only oracle
+(`--recovery-scope environment-reset`) and is not part of the formal matrix.
 
 ## Repository layout
 
 ```text
-configs/             reproducible batch manifests
-docs/                experiment and reproducibility notes
-maps/development/    maps used while designing prompts and the harness
-maps/evaluation/     LLM-held-out maps frozen before official evaluation
-results/summaries/   reviewed aggregate results suitable for version control
-scripts/             experiment runner, batch runner, harness, and viewer server
-tests/               deterministic unit and integration tests
-viewer/              browser-based replay interface
+configs/    batch manifests (configs/evaluation_batch.json is the formal matrix)
+docs/       experiment protocol
+maps/       development maps and the ten generated evaluation maps
+scripts/    harness, runners, map generator, aggregation, viewer server
+tests/      deterministic tests (no LLM calls)
+viewer/     browser replay of runs
+results/    raw runs and batches (ignored by Git) and reviewed summaries
 ```
 
-Raw runs are written to `results/runs/` and batch executions to
-`results/batches/`. Both directories are ignored by Git because they can be
-large and may contain complete prompts. Reviewed aggregate tables belong in
-`results/summaries/`.
+## Setup
 
-## Requirements
-
-- Python 3.11 (the pinned evaluation runtime)
-- no third-party Python packages for the core harness
-- TritonAI access for official LLM experiments
-
-The course evaluation uses TritonAI. Other OpenAI-compatible endpoints may be
-useful for local debugging, but they should not be mixed into the official
-TritonAI result tables.
-
-Configure the endpoint in the current shell:
+The core harness uses only the Python standard library. The formal runs use a
+self-contained conda environment pinned to CPython 3.14.2, so system or
+Homebrew upgrades cannot change the interpreter during an experiment. Do not
+install or update packages in it while a batch (or its resume) is pending:
 
 ```bash
-export LLM_CHAT_COMPLETIONS_URL='https://tritonai-api.ucsd.edu/v1/chat/completions'
-export LLM_API_KEY='YOUR_TRITONAI_KEY'
-export LLM_MODEL='api-glm-5.3'
-export LLM_REASONING_EFFORT='low'
+conda create -n safe-mas-py314 --override-channels -c conda-forge "python=3.14.2=*_cp314"
+conda activate safe-mas-py314
+cp .env.example .env        # then fill in the TritonAI values
+set -a; source .env; set +a
 ```
 
-Never place the real key in a tracked file. `.env` is ignored; `.env.example`
-contains only placeholders.
+Required variables: `LLM_CHAT_COMPLETIONS_URL`, `LLM_API_KEY`, `LLM_MODEL`
+(`api-glm-5.3`), and `LLM_REASONING_EFFORT` (`low`). Never commit the real key.
 
-## Validate the repository
+## Usage
 
-Run the complete test suite:
+Check the code and maps without calling an LLM:
 
 ```bash
-python3 -m unittest discover -s tests -v
+python -m unittest discover -s tests
+python scripts/generate_evaluation_maps.py --output maps/evaluation --check
+python scripts/run_batch.py configs/evaluation_batch.json \
+  --backend dry-run --repetitions 1 --execute --output-root /tmp/rehearsal
 ```
 
-Run deterministic map and scheduler preflight checks:
+Run one experiment:
 
 ```bash
-python3 scripts/run_experiment.py \
-  maps/development/shared_static_traps_small.json \
-  --validate-only \
-  --planning-granularity chunk \
-  --chunk-size 3
-
-python3 scripts/run_experiment.py \
-  maps/development/shared_asymmetric_crossing.json \
-  --validate-only \
-  --planning-granularity chunk \
-  --chunk-size 3
+python scripts/run_experiment.py maps/evaluation/e1_pocket_crossing.json \
+  --backend llm --mode full-restart --fault a-fire-sword-1-monster-decoy \
+  --planning-granularity chunk --chunk-size 3 \
+  --detection-trigger after-fault-caused-harm --recovery-scope agent-only
 ```
 
-The test suite also validates all three evaluation maps and their precommitted
-fault classifications without calling an LLM.
-
-Preflight is a harness check, not evidence about LLM quality.
-
-## Run one TritonAI experiment
-
-Clean execution:
+Run the formal batch (one repetition first, then all three), resume it if it is
+interrupted, and aggregate the results:
 
 ```bash
-python3 scripts/run_experiment.py \
-  maps/development/shared_asymmetric_crossing.json \
-  --backend llm \
-  --mode clean \
-  --planning-granularity chunk \
-  --chunk-size 3
-```
-
-Paired fault propagation and full restart:
-
-```bash
-python3 scripts/run_experiment.py \
-  maps/development/shared_asymmetric_crossing.json \
-  --backend llm \
-  --mode full-restart \
-  --fault f-water-lower-coordinate-shift \
-  --planning-granularity chunk \
-  --chunk-size 3 \
-  --detection-delay-ticks 0
-```
-
-Trusted-source verification upper bound:
-
-```bash
-python3 scripts/run_experiment.py \
-  maps/development/shared_asymmetric_crossing.json \
-  --backend llm \
-  --mode always-verify \
-  --fault f-water-lower-coordinate-shift \
-  --planning-granularity chunk \
-  --chunk-size 3 \
-  --detection-delay-ticks 0
-```
-
-`always-verify` compares messages with immutable source sensor facts. It is an
-oracle prevention baseline and does not represent a deployable LLM verifier.
-
-LLM verification against the same trusted source facts:
-
-```bash
-python3 scripts/run_experiment.py \
-  maps/development/shared_asymmetric_crossing.json \
-  --backend llm \
-  --mode llm-verify \
-  --fault f-water-lower-coordinate-shift \
-  --planning-granularity chunk \
-  --chunk-size 3 \
-  --detection-delay-ticks 0
-```
-
-`llm-verify` adds one verifier request before each structured message is
-delivered. Rejected messages are regenerated from the trusted facts. Verifier
-TP/FP/FN/TN, calls, tokens, and latency are reported separately, so this
-baseline measures both the protection and the added cost. It is still a
-provenance-assisted verifier, not a detector that discovers faults without a
-trusted source.
-
-## Run a reproducible batch
-
-Preview the development commands without spending API quota:
-
-```bash
-python3 scripts/run_batch.py configs/development_batch.json
-```
-
-Execute the batch after reviewing the printed plan:
-
-```bash
-python3 scripts/run_batch.py configs/development_batch.json \
-  --backend llm \
-  --execute
-```
-
-The batch runner:
-
-- repeats every declared condition three times by default;
-- enforces the manifest's TritonAI endpoint host and model identifier;
-- creates one isolated directory per run;
-- continues after failures and timeouts;
-- records every outcome in `batch-summary.json`;
-- records manifest/map hashes, Python version, Git revision when available,
-  model, and endpoint host, but never writes the API key.
-
-Use `--repetitions 1` for an inexpensive integration check. Do not use the
-development batch as final held-out evidence.
-
-The official held-out manifest is `configs/evaluation_batch.json`. Inspect its
-42 planned runs before spending quota:
-
-```bash
-python3 scripts/run_batch.py configs/evaluation_batch.json
-```
-
-After the code, prompts, model, maps, and manifest are frozen, first run a
-single-repetition integration batch, inspect every outcome, and only then run
-the declared three repetitions:
-
-```bash
-python3 scripts/run_batch.py configs/evaluation_batch.json \
-  --backend llm \
-  --repetitions 1 \
-  --execute
-
-python3 scripts/run_batch.py configs/evaluation_batch.json \
-  --backend llm \
-  --execute
-```
-
-Aggregate a completed batch (replace `BATCH_NAME` with the generated directory):
-
-```bash
-python3 scripts/aggregate_results.py \
-  results/batches/BATCH_NAME/batch-summary.json \
+python scripts/run_batch.py configs/evaluation_batch.json --backend llm --repetitions 1 --execute
+python scripts/run_batch.py configs/evaluation_batch.json --backend llm --execute
+python scripts/run_batch.py configs/evaluation_batch.json --backend llm --execute \
+  --resume results/batches/BATCH_NAME
+python scripts/aggregate_results.py results/batches/BATCH_NAME/batch-summary.json \
   --output results/summaries
 ```
 
-The aggregation pipeline retains errors and timeouts in the primary success
-denominator and emits run-level, condition-level, paired-run,
-paired-condition, failure, and machine-readable summary files. Fault funnel
-rates explicitly report both completed-run and all-planned-run denominators.
-
-## Output and metric semantics
-
-Each run writes:
-
-```text
-config.json
-episode-summary.json
-events.jsonl
-artifacts.jsonl
-calls.json
-```
-
-Important summary fields:
-
-- `fault_metrics`: injection, delivery, planner exposure, declared/structured
-  dependency, structured route relevance, executed harm, caused failure,
-  affected stages, blocked unsafe-action attempts, and executed unauthorized
-  actions. Structured route relevance is an operational label from the frozen
-  route representation, not a claim of causal-dependency ground truth;
-- `dependency_quality`: plan-level TP/FP/FN/TN, precision, and recall;
-- `verification_confusion`, `verification_llm_calls`, `verification_usage`,
-  and `latency_ms.verification`: verifier quality and marginal cost;
-- `executed_actions` and `message_count`: workload measures that complement
-  model-call and token counts;
-- `fault_declared_phase`, `fault_injection_phase`, and
-  `fault_injection_tick`: the precommitted and observed injection schedule;
-- `detection`: the chargeable prefix boundary and observed delay;
-- `paired_baselines.no_recovery`: complete first faulty attempt;
-- `paired_baselines.full_restart`: shared prefix through detection plus restart,
-  including wasted action/call/token counts for the discarded prefix;
-- top-level `backend_calls`, `usage`, and `latency_ms`: actual harness work,
-  including any post-detection diagnostic suffix.
-
-Schema-v4 evaluation faults have operational rules: accidental coordinate
-shifts use a fixed offset, adversarial shifts use a precommitted route decoy,
-and `drop_once` omissions retransmit the unchanged source fact on a later
-round. A delivered fault is not automatically counted as causal.
-
-## Replay traces
-
-Start the local viewer:
+Replay a run in the browser:
 
 ```bash
-python3 scripts/serve_viewer.py --port 8765
+python scripts/serve_viewer.py --port 8765   # open http://127.0.0.1:8765
 ```
 
-Then open `http://127.0.0.1:8765`. The viewer exposes the ground-truth map,
-agent belief views, paths, messages, plans, calls, and event timeline.
+## Main metrics
 
-## Evaluation discipline
+- goal success and safe (full-health) success;
+- the fault propagation funnel: delivered, used in a plan, executed, harm,
+  failure;
+- LLM calls, tokens, latency, executed actions, and messages;
+- wasted work discarded by a restart and damage that a restart cannot undo;
+- verifier accuracy and cost.
 
-- Development maps may be used to revise prompts and code.
-- Evaluation maps must be frozen before their LLM outcomes are inspected.
-- Keep accidental and adversarial faults separate.
-- Pin model, endpoint, Python version, maps, prompts, and code revision.
-- Retain failed, malformed, and timed-out runs.
-- Repeat stochastic runs and report variability rather than only successful
-  examples.
-- Distinguish navigation failure from recovery or verification success.
-- Report pre-detection trap entries even if a later restart succeeds.
-
-See [docs/experiment_protocol.md](docs/experiment_protocol.md) for the current
-run matrix and held-out-map protocol.
+Errors and timeouts stay in every success denominator. See
+[docs/experiment_protocol.md](docs/experiment_protocol.md) for the full
+matrix, detection rules, and evaluation discipline.

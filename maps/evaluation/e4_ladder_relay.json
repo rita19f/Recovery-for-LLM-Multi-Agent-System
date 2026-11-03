@@ -1,0 +1,299 @@
+{
+  "schema_version": 5,
+  "id": "e4-ladder-relay-eval-v2",
+  "description": "descend one's own ladder while the partner reports swords, then climb the partner's ladder to a goal monster first seen in stage 2",
+  "world_model": "shared",
+  "dimensions": {
+    "width": 9,
+    "height": 9
+  },
+  "coordinate_system": {
+    "origin": "top-left",
+    "cell": "[x, y]"
+  },
+  "public_rows": [
+    "##.###.##",
+    "#...#...#",
+    "#.#.#.#.#",
+    "#...#...#",
+    "#.#.#.#.#",
+    "#...#...#",
+    "#.#.#.#.#",
+    "#.......#",
+    "##.#.#.##"
+  ],
+  "hazards": {
+    "fire": [],
+    "water": []
+  },
+  "agents": {
+    "P1": {
+      "sensor": "fire",
+      "start": [
+        1,
+        1
+      ],
+      "goal": [
+        6,
+        0
+      ]
+    },
+    "P2": {
+      "sensor": "water",
+      "start": [
+        7,
+        1
+      ],
+      "goal": [
+        2,
+        0
+      ]
+    }
+  },
+  "observation_radius": 2,
+  "message_fact_limit": 2,
+  "step_limit": 56,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {
+    "P1": [],
+    "P2": []
+  },
+  "phases": [
+    {
+      "id": "stage-1",
+      "start": {
+        "P1": [
+          1,
+          1
+        ],
+        "P2": [
+          7,
+          1
+        ]
+      },
+      "target": {
+        "P1": [
+          4,
+          7
+        ],
+        "P2": [
+          4,
+          7
+        ]
+      },
+      "max_actions": {
+        "P1": 24,
+        "P2": 24
+      },
+      "reference_routes": {
+        "P1": [
+          [
+            "RIGHT",
+            "RIGHT",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "RIGHT"
+          ]
+        ],
+        "P2": [
+          [
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "LEFT",
+            "LEFT",
+            "LEFT"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "stage-2",
+      "start": {
+        "P1": [
+          4,
+          7
+        ],
+        "P2": [
+          4,
+          7
+        ]
+      },
+      "target": {
+        "P1": [
+          6,
+          0
+        ],
+        "P2": [
+          2,
+          0
+        ]
+      },
+      "max_actions": {
+        "P1": 28,
+        "P2": 32
+      },
+      "reference_routes": {
+        "P1": [
+          [
+            "RIGHT",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "RIGHT",
+            "UP"
+          ]
+        ],
+        "P2": [
+          [
+            "LEFT",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "LEFT",
+            "UP"
+          ]
+        ]
+      }
+    }
+  ],
+  "finale_actions": {
+    "P1": [],
+    "P2": []
+  },
+  "faults": [
+    {
+      "id": "f-fire-sword-1-offset",
+      "class": "accidental",
+      "phase": "stage-1",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "fact_type": "weapon",
+      "object_type": "fire_sword",
+      "true_cell": [
+        2,
+        8
+      ],
+      "kind": "coordinate_shift",
+      "selection_rule": {
+        "type": "fixed_offset",
+        "delta": [
+          0,
+          -3
+        ]
+      },
+      "expected_effect": "P2 is told the fire_sword at [2, 8] is offset by [0, -3] and may lose HP crossing an unbeaten monster or waste steps."
+    },
+    {
+      "id": "a-ice-sword-1-monster-decoy",
+      "class": "adversarial",
+      "phase": "stage-1",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "fact_type": "weapon",
+      "object_type": "ice_sword",
+      "true_cell": [
+        4,
+        8
+      ],
+      "kind": "coordinate_shift",
+      "selection_rule": {
+        "type": "route_decoy",
+        "cell": [
+          6,
+          1
+        ]
+      },
+      "expected_effect": "P1 is told the ice_sword at [4, 8] is on the monster cell [6, 1] and may lose HP crossing an unbeaten monster or waste steps."
+    },
+    {
+      "id": "f-fire-sword-1-drop-once",
+      "class": "accidental",
+      "phase": "stage-1",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "fact_type": "weapon",
+      "object_type": "fire_sword",
+      "true_cell": [
+        2,
+        8
+      ],
+      "kind": "omission",
+      "selection_rule": {
+        "type": "drop_once"
+      },
+      "expected_effect": "The first report of fire-sword-1 is dropped and retransmitted unchanged before it is needed; no HP should be lost."
+    }
+  ],
+  "stateful_world": {
+    "max_hp": 3,
+    "weapons": [
+      {
+        "id": "fire-sword-1",
+        "weapon_type": "fire_sword",
+        "cell": [
+          2,
+          8
+        ],
+        "sensed_by": "P1"
+      },
+      {
+        "id": "ice-sword-1",
+        "weapon_type": "ice_sword",
+        "cell": [
+          4,
+          8
+        ],
+        "sensed_by": "P2"
+      }
+    ],
+    "monsters": [
+      {
+        "id": "fire-monster-west",
+        "monster_type": "fire_monster",
+        "required_weapon": "fire_sword",
+        "cell": [
+          2,
+          1
+        ]
+      },
+      {
+        "id": "ice-monster-east",
+        "monster_type": "ice_monster",
+        "required_weapon": "ice_sword",
+        "cell": [
+          6,
+          1
+        ]
+      }
+    ]
+  },
+  "generator": {
+    "script": "scripts/generate_evaluation_maps.py",
+    "version": 1,
+    "template": "e4-ladder-relay",
+    "suite": "extended",
+    "size_class": "medium",
+    "seed": 1,
+    "expected_classifications": {
+      "f-fire-sword-1-offset": "executed_with_harm",
+      "a-ice-sword-1-monster-decoy": "executed_with_harm",
+      "f-fire-sword-1-drop-once": "non_propagating"
+    },
+    "scripted_clean_actions": 42,
+    "rejected_seeds": 1
+  }
+}

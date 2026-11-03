@@ -181,6 +181,7 @@ class AggregateResultsTest(unittest.TestCase):
                 "condition_summary.csv",
                 "paired_recovery.csv",
                 "paired_condition_summary.csv",
+                "paired_condition_summary_trigger_observed.csv",
                 "failure_summary.csv",
                 "evaluation_summary.json",
             ):
@@ -242,6 +243,147 @@ class AggregateResultsTest(unittest.TestCase):
         self.assertEqual(summary["full_restart_success_rate"], 1.0)
         self.assertEqual(summary["delta_total_tokens_mean"], 30.0)
         self.assertEqual(summary["full_restart_wasted_total_tokens_mean"], 10.0)
+
+    def test_forked_scopes_become_one_record_per_scope(self) -> None:
+        from recovery_harness import ScriptedBackend, run_experiment, write_run
+
+        data = json.loads(
+            (
+                PROJECT_ROOT / "maps" / "development" / "stateful_weapon_crossing.json"
+            ).read_text()
+        )
+        fault_id = "a-ice-sword-monster-decoy"
+        result = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="full-restart",
+            fault_id=fault_id,
+            planning_granularity="chunk",
+            chunk_size=3,
+            detection_trigger="after-fault-caused-harm",
+            recovery_scope="both",
+        )
+        condition = {
+            "map_id": data["id"],
+            "mode": "full-restart",
+            "fault_id": fault_id,
+            "fault_class": "adversarial",
+            "planning_granularity": "chunk",
+            "chunk_size": 3,
+            "detection_trigger": "after-fault-caused-harm",
+            "recovery_scope": "both",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_run(root / "forked-r01", {}, result)
+            (root / "failed-r01").mkdir()
+            batch_path = root / "batch-summary.json"
+            batch_path.write_text(
+                json.dumps(
+                    {
+                        "batch_name": "fixture",
+                        "backend": "scripted",
+                        "model": "none",
+                        "outcomes": [
+                            {
+                                "run_id": "forked-r01",
+                                "return_code": 0,
+                                "output_dir": str(root / "forked-r01"),
+                                "condition": condition,
+                                "result": {"status": "ok"},
+                            },
+                            {
+                                "run_id": "failed-r01",
+                                "return_code": 1,
+                                "output_dir": str(root / "failed-r01"),
+                                "condition": condition,
+                                "result": {"status": "error", "error": "boom"},
+                            },
+                        ],
+                    }
+                )
+            )
+            rows, pairs = collect_rows([batch_path])
+
+        self.assertEqual(
+            [(row["run_id"], row["recovery_scope"]) for row in rows],
+            [
+                ("forked-r01", "environment-reset"),
+                ("forked-r01", "agent-only"),
+                ("failed-r01", "environment-reset"),
+                ("failed-r01", "agent-only"),
+            ],
+        )
+        reset_row, agent_row = rows[0], rows[1]
+        prefix_actions = result["detection"]["executed_action_count"]
+        self.assertTrue(reset_row["full_health_success"])
+        self.assertEqual(reset_row["irreversible_damage"], 0)
+        self.assertEqual(reset_row["wasted_executed_actions"], prefix_actions)
+        self.assertFalse(agent_row["full_health_success"])
+        self.assertEqual(agent_row["irreversible_damage"], 1)
+        self.assertEqual(agent_row["retained_executed_actions"], prefix_actions)
+
+        # Both pairs share the same faulty prefix and no-recovery baseline.
+        self.assertEqual(
+            [pair["recovery_scope"] for pair in pairs],
+            ["environment-reset", "agent-only"],
+        )
+        self.assertEqual(pairs[0]["detection_tick"], pairs[1]["detection_tick"])
+        self.assertEqual(
+            pairs[0]["no_recovery_executed_actions"],
+            pairs[1]["no_recovery_executed_actions"],
+        )
+
+        # The failed run stays in the denominator of each scope condition.
+        by_scope = {item["recovery_scope"]: item for item in condition_rows(rows)}
+        self.assertEqual(by_scope["environment-reset"]["n_planned"], 2)
+        self.assertEqual(by_scope["environment-reset"]["n_error"], 1)
+        self.assertEqual(
+            by_scope["environment-reset"]["full_health_success_rate_all_runs"], 0.5
+        )
+        self.assertEqual(
+            by_scope["agent-only"]["full_health_success_rate_all_runs"], 0.0
+        )
+
+    def test_paired_summary_reports_trigger_rate_and_observed_subset(
+        self,
+    ) -> None:
+        base = {
+            "backend": "llm",
+            "model": "test-model",
+            "map_id": "map",
+            "recovery_scope": "agent-only",
+            "fault_id": "fault",
+            "fault_class": "adversarial",
+            "planning_granularity": "chunk",
+            "chunk_size": 3,
+            "detection_delay_ticks": None,
+            "detection_trigger": "after-fault-caused-harm",
+            "no_recovery_full_health_success": False,
+            "full_restart_full_health_success": False,
+            "full_restart_pre_detection_damage": 1,
+            "detection_trigger_observed": True,
+        }
+        fallback = {
+            **base,
+            "no_recovery_full_health_success": True,
+            "full_restart_full_health_success": True,
+            "full_restart_pre_detection_damage": 0,
+            "detection_trigger_observed": False,
+        }
+        pairs = [base, base, fallback]
+        all_pairs = paired_condition_rows(pairs)[0]
+        self.assertEqual(all_pairs["n_pairs"], 3)
+        self.assertEqual(all_pairs["detection_trigger_observed_rate"], 0.6667)
+        self.assertEqual(
+            all_pairs["full_restart_full_health_success_rate"], 0.3333
+        )
+        observed = paired_condition_rows(
+            [item for item in pairs if item["detection_trigger_observed"]]
+        )[0]
+        self.assertEqual(observed["n_pairs"], 2)
+        self.assertEqual(observed["full_restart_full_health_success_rate"], 0.0)
+        self.assertEqual(observed["full_restart_pre_detection_damage_mean"], 1.0)
 
     def test_verifier_confusion_is_pooled_across_runs(self) -> None:
         base = {

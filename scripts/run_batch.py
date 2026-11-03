@@ -73,11 +73,25 @@ def build_command(
     fault = spec.get("fault")
     if fault:
         command.extend(["--fault", str(fault)])
+    detection_trigger = spec.get(
+        "detection_trigger", defaults.get("detection_trigger", "delay")
+    )
+    if spec["mode"] != "clean":
+        command.extend(["--detection-trigger", str(detection_trigger)])
     detection_delay = spec.get(
         "detection_delay_ticks", defaults.get("detection_delay_ticks")
     )
-    if detection_delay is not None and spec["mode"] != "clean":
+    if (
+        detection_trigger == "delay"
+        and detection_delay is not None
+        and spec["mode"] != "clean"
+    ):
         command.extend(["--detection-delay-ticks", str(detection_delay)])
+    if spec["mode"] == "full-restart":
+        recovery_scope = spec.get(
+            "recovery_scope", defaults.get("recovery_scope", "environment-reset")
+        )
+        command.extend(["--recovery-scope", str(recovery_scope)])
     return command
 
 
@@ -129,6 +143,81 @@ def repository_revision() -> dict[str, Any]:
         return {"commit": None, "dirty": None}
 
 
+def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    """Atomically replace a JSON checkpoint in the same directory."""
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    os.replace(temporary, path)
+
+
+def status_counts(outcomes: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        status: sum(
+            outcome.get("result", {}).get("status") == status
+            for outcome in outcomes
+        )
+        for status in ("ok", "error", "timeout")
+    }
+
+
+def update_batch_state(
+    state: dict[str, Any],
+    outcomes: list[dict[str, Any]],
+    *,
+    active_run: str | None,
+    complete: bool = False,
+) -> None:
+    state["status"] = "complete" if complete else "running"
+    state["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    state["active_run"] = active_run
+    state["completed_runs"] = len(outcomes)
+    state["status_counts"] = status_counts(outcomes)
+    state["outcomes"] = outcomes
+    if complete:
+        state["finished_at_utc"] = state["updated_at_utc"]
+
+
+def validate_resume_state(
+    state: dict[str, Any], expected: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Reject a resume whose frozen experiment identity has changed."""
+    checked_fields = (
+        "schema_version",
+        "batch_name",
+        "manifest_sha256",
+        "repository",
+        "python_version",
+        "map_sha256",
+        "backend",
+        "model",
+        "endpoint_host",
+        "repetitions",
+        "planned_runs",
+        "planned_run_ids",
+    )
+    mismatches = [
+        field for field in checked_fields if state.get(field) != expected.get(field)
+    ]
+    if mismatches:
+        raise ValueError(
+            "cannot resume because frozen batch metadata changed: "
+            + ", ".join(mismatches)
+        )
+    outcomes = state.get("outcomes")
+    if not isinstance(outcomes, list):
+        raise ValueError("resume checkpoint has no valid outcomes list")
+    completed_ids = [outcome.get("run_id") for outcome in outcomes]
+    if len(completed_ids) != len(set(completed_ids)):
+        raise ValueError("resume checkpoint contains duplicate run IDs")
+    unknown = set(completed_ids) - set(expected["planned_run_ids"])
+    if unknown:
+        raise ValueError(
+            "resume checkpoint contains unknown run IDs: "
+            + ", ".join(sorted(str(item) for item in unknown))
+        )
+    return outcomes
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=Path)
@@ -136,7 +225,14 @@ def main() -> int:
         "--backend", choices=("llm", "scripted", "dry-run"), default="llm"
     )
     parser.add_argument("--repetitions", type=int)
-    parser.add_argument("--output-root", type=Path)
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument("--output-root", type=Path)
+    output_group.add_argument(
+        "--resume",
+        type=Path,
+        metavar="BATCH_DIRECTORY",
+        help="resume an interrupted batch from its batch-state.json checkpoint",
+    )
     parser.add_argument("--process-timeout", type=int, default=900)
     parser.add_argument(
         "--execute",
@@ -144,6 +240,8 @@ def main() -> int:
         help="execute the plan; without this flag, only print commands",
     )
     args = parser.parse_args()
+    if args.resume is not None and not args.execute:
+        parser.error("--resume requires --execute")
 
     manifest_path = args.manifest.resolve()
     manifest = read_manifest(manifest_path)
@@ -157,7 +255,9 @@ def main() -> int:
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_root = (
-        args.output_root.resolve()
+        args.resume.resolve()
+        if args.resume
+        else args.output_root.resolve()
         if args.output_root
         else REPO_ROOT / "results" / "batches" / f"{timestamp}-{batch_name}"
     )
@@ -194,8 +294,34 @@ def main() -> int:
                     )
                 ),
                 "chunk_size": int(spec.get("chunk_size", defaults.get("chunk_size", 3))),
-                "detection_delay_ticks": spec.get(
-                    "detection_delay_ticks", defaults.get("detection_delay_ticks")
+                "detection_trigger": (
+                    spec.get(
+                        "detection_trigger",
+                        defaults.get("detection_trigger", "delay"),
+                    )
+                    if spec["mode"] != "clean"
+                    else None
+                ),
+                "detection_delay_ticks": (
+                    spec.get(
+                        "detection_delay_ticks",
+                        defaults.get("detection_delay_ticks"),
+                    )
+                    if spec["mode"] != "clean"
+                    and spec.get(
+                        "detection_trigger",
+                        defaults.get("detection_trigger", "delay"),
+                    )
+                    == "delay"
+                    else None
+                ),
+                "recovery_scope": (
+                    spec.get(
+                        "recovery_scope",
+                        defaults.get("recovery_scope", "environment-reset"),
+                    )
+                    if spec["mode"] == "full-restart"
+                    else None
                 ),
             }
             planned.append(
@@ -241,12 +367,66 @@ def main() -> int:
                 f"{actual_host!r}"
             )
 
-    output_root.mkdir(parents=True, exist_ok=False)
-    outcomes: list[dict[str, Any]] = []
+    endpoint_host = urllib.parse.urlparse(
+        os.environ.get("LLM_CHAT_COMPLETIONS_URL", "")
+    ).hostname
+    expected_state = {
+        "schema_version": 1,
+        "batch_name": batch_name,
+        "manifest": str(manifest_path),
+        "manifest_sha256": sha256_file(manifest_path),
+        "repository": repository_revision(),
+        "python_version": sys.version,
+        "map_sha256": {
+            spec["map"]: sha256_file(resolve_repo_path(spec["map"]))
+            for spec in manifest["runs"]
+        },
+        "backend": args.backend,
+        "model": os.environ.get("LLM_MODEL") if args.backend == "llm" else None,
+        "endpoint_host": endpoint_host,
+        "repetitions": repetitions,
+        "planned_runs": len(planned),
+        "planned_run_ids": [instance_id for instance_id, _, _, _ in planned],
+    }
+    state_path = output_root / "batch-state.json"
+    if args.resume:
+        if not output_root.is_dir() or not state_path.is_file():
+            raise ValueError(
+                f"resume directory has no batch-state.json: {output_root}"
+            )
+        state = json.loads(state_path.read_text())
+        outcomes = validate_resume_state(state, expected_state)
+        print(
+            f"Resuming {len(outcomes)}/{len(planned)} completed runs from "
+            f"{output_root}",
+            flush=True,
+        )
+        if state.get("active_run") and not any(
+            outcome.get("run_id") == state["active_run"] for outcome in outcomes
+        ):
+            print(
+                f"Re-running interrupted uncheckpointed run: {state['active_run']}",
+                flush=True,
+            )
+    else:
+        output_root.mkdir(parents=True, exist_ok=False)
+        state = {
+            **expected_state,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        outcomes = []
+        update_batch_state(state, outcomes, active_run=None)
+        atomic_write_json(state_path, state)
+
+    completed_ids = {outcome["run_id"] for outcome in outcomes}
     for index, (instance_id, command, output_dir, condition) in enumerate(
         planned, start=1
     ):
+        if instance_id in completed_ids:
+            continue
         print(f"Running {index}/{len(planned)}: {instance_id}", flush=True)
+        update_batch_state(state, outcomes, active_run=instance_id)
+        atomic_write_json(state_path, state)
         try:
             completed = subprocess.run(
                 command,
@@ -257,7 +437,7 @@ def main() -> int:
                 check=False,
             )
             result = parse_child_output(completed.stdout)
-            outcomes.append(
+            outcome = (
                 {
                     "run_id": instance_id,
                     "return_code": completed.returncode,
@@ -268,7 +448,7 @@ def main() -> int:
                 }
             )
         except subprocess.TimeoutExpired as exc:
-            outcomes.append(
+            outcome = (
                 {
                     "run_id": instance_id,
                     "return_code": None,
@@ -283,36 +463,16 @@ def main() -> int:
                     else "",
                 }
             )
+        outcomes.append(outcome)
+        completed_ids.add(instance_id)
+        update_batch_state(state, outcomes, active_run=None)
+        atomic_write_json(state_path, state)
 
-    endpoint_host = urllib.parse.urlparse(
-        os.environ.get("LLM_CHAT_COMPLETIONS_URL", "")
-    ).hostname
-    summary = {
-        "batch_name": batch_name,
-        "created_at_utc": timestamp,
-        "manifest": str(manifest_path),
-        "manifest_sha256": sha256_file(manifest_path),
-        "repository": repository_revision(),
-        "python_version": sys.version,
-        "map_sha256": {
-            spec["map"]: sha256_file(resolve_repo_path(spec["map"]))
-            for spec in manifest["runs"]
-        },
-        "backend": args.backend,
-        "model": os.environ.get("LLM_MODEL") if args.backend == "llm" else None,
-        "endpoint_host": endpoint_host,
-        "planned_runs": len(planned),
-        "completed_runs": len(outcomes),
-        "status_counts": {
-            status: sum(
-                outcome["result"].get("status") == status for outcome in outcomes
-            )
-            for status in ("ok", "error", "timeout")
-        },
-        "outcomes": outcomes,
-    }
+    update_batch_state(state, outcomes, active_run=None, complete=True)
+    atomic_write_json(state_path, state)
+    summary = dict(state)
     summary_path = output_root / "batch-summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    atomic_write_json(summary_path, summary)
     print(json.dumps({"status": "complete", "summary": str(summary_path)}, indent=2))
     return 0 if summary["status_counts"]["ok"] == len(outcomes) else 1
 

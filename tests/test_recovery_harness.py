@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import io
 import sys
@@ -14,12 +15,16 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from recovery_harness import (  # noqa: E402
     assess_step_plan_output,
+    AttemptTrace,
     detect_navigation_loop,
     DryRunBackend,
     EpisodeError,
+    execute_segment,
     HTTP_USER_AGENT,
+    initial_runtime_state,
     LLMBackend,
     LLMResponseParseError,
+    MOVES,
     ScriptedBackend,
     inject_fault,
     planning_messages,
@@ -40,6 +45,9 @@ from recovery_harness import (  # noqa: E402
 MAP_PATH = PROJECT_ROOT / "maps" / "development" / "shared_static_traps_small.json"
 ASYMMETRIC_MAP_PATH = (
     PROJECT_ROOT / "maps" / "development" / "shared_asymmetric_crossing.json"
+)
+STATEFUL_MAP_PATH = (
+    PROJECT_ROOT / "maps" / "development" / "stateful_weapon_crossing.json"
 )
 RELEVANT_FAULT = "f-water-lower-coordinate-shift"
 IRRELEVANT_FAULT = "f-water-lower-irrelevant-omission"
@@ -121,6 +129,490 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertEqual(
             result["phases"][0]["agents"]["P2"]["target"], [1, 5]
         )
+
+    def test_stateful_weapon_map_validates(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        result = validate_map(data)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["stateful_world"]["max_hp"], 3)
+        self.assertEqual(
+            result["stateful_world"]["weapon_ids"],
+            ["fire-sword-west", "ice-sword-east"],
+        )
+        self.assertEqual(
+            result["stateful_world"]["monster_ids"],
+            ["fire-monster-west", "ice-monster-east"],
+        )
+
+    def test_stateful_objects_may_not_occupy_start(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        data["stateful_world"]["weapons"][0]["cell"] = data["agents"]["P1"]["start"]
+        with self.assertRaisesRegex(Exception, "start/goal"):
+            validate_map(data)
+
+    def test_stateful_sensing_agent_cannot_pick_up_and_weapons_are_single_use(
+        self,
+    ) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        runtime = initial_runtime_state(data)
+        trace = AttemptTrace("unit")
+        step_state = {"P1": 0, "P2": 0}
+
+        def step(agent: str, position: list[int], action: str) -> None:
+            dx, dy = {"UP": (0, -1), "DOWN": (0, 1)}[action]
+            execute_segment(
+                data=data,
+                agent=agent,
+                position=tuple(position),
+                actions=[action],
+                target=(position[0] + dx, position[1] + dy),
+                plan_id="unit-plan",
+                trace=trace,
+                step_state=step_state,
+                runtime=runtime,
+            )
+
+        # P2 senses the ice sword, so stepping onto it does not collect it.
+        step("P2", [6, 5], "DOWN")
+        self.assertEqual(runtime["inventory"]["P2"], [])
+        self.assertIn("ice-sword-east", runtime["available_weapons"])
+
+        # P1 can collect it; the weapon then leaves the shared world.
+        step("P1", [6, 5], "DOWN")
+        self.assertEqual(runtime["inventory"]["P1"], ["ice_sword"])
+        self.assertNotIn("ice-sword-east", runtime["available_weapons"])
+
+        # Defeating the matching monster consumes the weapon without damage.
+        step("P1", [7, 4], "UP")
+        self.assertEqual(runtime["inventory"]["P1"], [])
+        self.assertNotIn("ice-monster-east", runtime["alive_monsters"])
+        self.assertEqual(runtime["health"]["P1"], 3)
+        defeat = next(
+            event for event in trace.events if event["event_type"] == "monster_defeated"
+        )
+        self.assertEqual(defeat["consumed_weapon"], "ice_sword")
+
+    def test_stateful_clean_run_consumes_both_weapons_at_full_health(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        result = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="clean",
+            fault_id=None,
+            planning_granularity="chunk",
+            chunk_size=3,
+        )
+        self.assertTrue(result["full_health_success"])
+        self.assertEqual(result["weapon_pickups"], 2)
+        self.assertEqual(result["monsters_defeated"], 2)
+        self.assertEqual(result["final_inventory"], {"P1": [], "P2": []})
+        self.assertEqual(result["alive_monster_ids"], [])
+
+    def test_stateful_relevant_faults_cause_damage_without_blocking_goal(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        for fault_id in ("f-ice-sword-east-offset", "a-ice-sword-monster-decoy"):
+            with self.subTest(fault_id=fault_id):
+                result = run_experiment(
+                    data,
+                    ScriptedBackend(),
+                    mode="no-recovery",
+                    fault_id=fault_id,
+                    planning_granularity="chunk",
+                    chunk_size=3,
+                )
+                metrics = result["fault_metrics"]
+                self.assertTrue(result["final_success"])
+                self.assertFalse(result["full_health_success"])
+                self.assertEqual(result["irreversible_damage"], 1)
+                self.assertEqual(result["final_health"], {"P1": 2, "P2": 3})
+                self.assertTrue(metrics["fault_structured_route_relevant_plan"])
+                self.assertTrue(metrics["fault_caused_harm"])
+                self.assertFalse(metrics["fault_caused_failure"])
+
+    def test_stateful_irrelevant_omission_causes_no_harm(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        result = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="no-recovery",
+            fault_id="f-fire-sword-west-drop-once",
+            planning_granularity="chunk",
+            chunk_size=3,
+        )
+        metrics = result["fault_metrics"]
+        self.assertTrue(metrics["fault_delivered_to_recipient"])
+        self.assertTrue(result["full_health_success"])
+        self.assertFalse(metrics["fault_structured_route_relevant_executed"])
+        self.assertFalse(metrics["fault_caused_harm"])
+
+    def test_stateful_blocked_fault_is_not_labeled_as_executed(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        result = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="always-verify",
+            fault_id="f-ice-sword-east-offset",
+            planning_granularity="chunk",
+            chunk_size=3,
+        )
+        metrics = result["fault_metrics"]
+        self.assertFalse(metrics["fault_delivered_to_recipient"])
+        self.assertFalse(metrics["fault_structured_route_relevant_executed"])
+        self.assertFalse(metrics["fault_caused_harm"])
+        self.assertTrue(result["full_health_success"])
+
+    def test_stateful_full_restart_keeps_pre_detection_damage(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        expectations = {
+            0: {
+                "pre_damage": 0,
+                "full_health": True,
+                "health": {"P1": 3, "P2": 3},
+                "available_weapons": ["fire-sword-west", "ice-sword-east"],
+                "alive_monsters": ["fire-monster-west", "ice-monster-east"],
+            },
+            9: {
+                "pre_damage": 1,
+                "full_health": False,
+                "health": {"P1": 2, "P2": 3},
+                "available_weapons": ["ice-sword-east"],
+                "alive_monsters": ["ice-monster-east"],
+            },
+        }
+        for delay, expected in expectations.items():
+            with self.subTest(detection_delay_ticks=delay):
+                result = run_experiment(
+                    data,
+                    ScriptedBackend(),
+                    mode="full-restart",
+                    fault_id="f-ice-sword-east-offset",
+                    planning_granularity="chunk",
+                    chunk_size=3,
+                    detection_delay_ticks=delay,
+                    recovery_scope="agent-only",
+                )
+                restart = result["paired_baselines"]["full_restart_by_scope"][
+                    "agent-only"
+                ]
+                resumed = result["attempts"][1]
+                self.assertTrue(restart["success"])
+                self.assertEqual(
+                    result["recovery_scope"], "agent-only"
+                )
+                self.assertTrue(resumed["resumed_from_physical_snapshot"])
+                self.assertEqual(
+                    resumed["initial_physical_state"],
+                    result["detection"]["physical_state_snapshot"],
+                )
+                self.assertEqual(
+                    restart["pre_detection_damage"], expected["pre_damage"]
+                )
+                self.assertEqual(
+                    restart["full_health_success"], expected["full_health"]
+                )
+                self.assertEqual(
+                    result["full_health_success"], expected["full_health"]
+                )
+                self.assertEqual(
+                    result["irreversible_damage"], expected["pre_damage"]
+                )
+                self.assertEqual(
+                    resumed["initial_physical_state"]["health"],
+                    expected["health"],
+                )
+                self.assertEqual(resumed["final_health"], expected["health"])
+                self.assertEqual(
+                    resumed["initial_physical_state"]["available_weapon_ids"],
+                    expected["available_weapons"],
+                )
+                self.assertEqual(
+                    resumed["initial_physical_state"]["alive_monster_ids"],
+                    expected["alive_monsters"],
+                )
+
+    def test_recovery_scope_is_a_matched_experimental_factor(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        result = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="full-restart",
+            fault_id="f-ice-sword-east-offset",
+            planning_granularity="chunk",
+            chunk_size=3,
+            detection_delay_ticks=9,
+            recovery_scope="both",
+        )
+
+        # Both restarts fork from the single shared faulty prefix.
+        self.assertEqual(result["recovery_scopes"], ["environment-reset", "agent-only"])
+        self.assertEqual(
+            [attempt["attempt"] for attempt in result["attempts"]],
+            [
+                "attempt-1",
+                "attempt-2-environment-reset",
+                "attempt-2-agent-only",
+            ],
+        )
+        self.assertEqual(
+            [attempt["recovery_scope"] for attempt in result["attempts"]],
+            [None, "environment-reset", "agent-only"],
+        )
+        # A multi-scope run has no single selected outcome.
+        self.assertFalse(result["scope_outcome_available"])
+        self.assertIsNone(result["final_success"])
+        self.assertIsNone(result["full_health_success"])
+        self.assertIsNone(result["outcome_path"])
+
+        by_scope = result["paired_baselines"]["full_restart_by_scope"]
+        environment_reset = by_scope["environment-reset"]
+        agent_only = by_scope["agent-only"]
+        self.assertTrue(environment_reset["success"])
+        self.assertTrue(agent_only["success"])
+        self.assertTrue(environment_reset["full_health_success"])
+        self.assertFalse(agent_only["full_health_success"])
+        self.assertEqual(environment_reset["damage_taken"], 0)
+        self.assertEqual(agent_only["damage_taken"], 1)
+        self.assertEqual(environment_reset["final_health"], {"P1": 3, "P2": 3})
+        self.assertEqual(agent_only["final_health"], {"P1": 2, "P2": 3})
+        self.assertTrue(environment_reset["recovery_improved_safe_outcome"])
+        self.assertFalse(agent_only["recovery_improved_safe_outcome"])
+        restarts = {attempt["recovery_scope"]: attempt for attempt in result["attempts"][1:]}
+        self.assertFalse(
+            restarts["environment-reset"]["resumed_from_physical_snapshot"]
+        )
+        self.assertTrue(restarts["agent-only"]["resumed_from_physical_snapshot"])
+        self.assertEqual(
+            restarts["agent-only"]["initial_physical_state"],
+            result["detection"]["physical_state_snapshot"],
+        )
+
+        # Prefix actions are redone after an environment reset but their
+        # physical effects are kept by an agent-only restart.
+        prefix_actions = result["detection"]["executed_action_count"]
+        self.assertGreater(prefix_actions, 0)
+        for scope, wasted_prefix in (
+            ("environment-reset", True),
+            ("agent-only", False),
+        ):
+            restart = by_scope[scope]
+            self.assertEqual(
+                restart["wasted_executed_actions"],
+                prefix_actions if wasted_prefix else 0,
+            )
+            self.assertEqual(
+                restart["retained_executed_actions"],
+                0 if wasted_prefix else prefix_actions,
+            )
+            self.assertEqual(
+                restart["executed_actions"],
+                prefix_actions + restarts[scope]["executed_actions"],
+            )
+            self.assertEqual(
+                restart["wasted_backend_calls"],
+                result["detection"]["backend_call_count"],
+            )
+        # Each scope is charged the shared prefix plus only its own restart.
+        self.assertEqual(
+            environment_reset["backend_calls"] + agent_only["backend_calls"],
+            2 * result["detection"]["backend_call_count"]
+            + (
+                result["backend_calls"]
+                - result["paired_baselines"]["no_recovery"]["backend_calls"]
+            ),
+        )
+
+        single = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="full-restart",
+            fault_id="f-ice-sword-east-offset",
+            planning_granularity="chunk",
+            chunk_size=3,
+            detection_delay_ticks=9,
+            recovery_scope="agent-only",
+        )
+        self.assertTrue(single["scope_outcome_available"])
+        self.assertEqual(
+            single["full_health_success"],
+            single["paired_baselines"]["full_restart_by_scope"]["agent-only"][
+                "full_health_success"
+            ],
+        )
+        self.assertEqual(single["irreversible_damage"], 1)
+
+    def test_unobserved_event_trigger_falls_back_to_outcome(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        result = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="full-restart",
+            fault_id="f-fire-sword-west-drop-once",
+            planning_granularity="chunk",
+            chunk_size=3,
+            detection_trigger="after-fault-caused-harm",
+            recovery_scope="agent-only",
+        )
+
+        self.assertFalse(result["fault_metrics"]["fault_caused_harm"])
+        self.assertTrue(result["recovery_triggered"])
+        self.assertEqual(
+            result["detection"]["reason"],
+            "trigger_not_observed_before_outcome:after-fault-caused-harm",
+        )
+        self.assertFalse(result["detection"]["trigger_observed"])
+
+    def test_event_trigger_snapshots_immediately_after_fault_caused_harm(
+        self,
+    ) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        result = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="full-restart",
+            fault_id="a-ice-sword-monster-decoy",
+            planning_granularity="chunk",
+            chunk_size=3,
+            detection_trigger="after-fault-caused-harm",
+            recovery_scope="agent-only",
+        )
+
+        self.assertEqual(result["detection_trigger"], "after-fault-caused-harm")
+        self.assertEqual(result["detection"]["reason"], "after_fault_caused_harm")
+        self.assertTrue(result["detection"]["trigger_observed"])
+        self.assertEqual(result["detection"]["damage_taken"], 1)
+        self.assertEqual(
+            result["detection"]["physical_state_snapshot"]["health"],
+            {"P1": 2, "P2": 3},
+        )
+        self.assertTrue(result["recovery_completed_successfully"])
+        self.assertFalse(result["recovery_improved_goal_outcome"])
+        self.assertFalse(result["recovery_improved_safe_outcome"])
+        self.assertFalse(result["recovered_success"])
+        self.assertFalse(result["full_health_success"])
+        self.assertEqual(result["outcome_path"]["damage_taken"], 1)
+        self.assertGreater(
+            result["actual_harness_work"]["executed_actions"],
+            result["outcome_path"]["executed_actions"],
+        )
+
+    def test_environment_reset_improves_safe_outcome_after_harm(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        result = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="full-restart",
+            fault_id="a-ice-sword-monster-decoy",
+            planning_granularity="chunk",
+            chunk_size=3,
+            detection_trigger="after-fault-caused-harm",
+            recovery_scope="environment-reset",
+        )
+
+        self.assertFalse(result["initial_full_health_success"])
+        self.assertTrue(result["final_success"])
+        self.assertTrue(result["full_health_success"])
+        self.assertTrue(result["recovery_completed_successfully"])
+        self.assertFalse(result["recovery_improved_goal_outcome"])
+        self.assertTrue(result["recovery_improved_safe_outcome"])
+        self.assertIsNone(result["clean_episode_success"])
+
+    def test_stateful_planner_prompt_hides_true_cell_and_states_hp_objective(
+        self,
+    ) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        backend = DryRunBackend()
+        run_experiment(
+            data,
+            backend,
+            mode="no-recovery",
+            fault_id="a-ice-sword-monster-decoy",
+            planning_granularity="chunk",
+            chunk_size=3,
+        )
+        prompts = [
+            "".join(message["content"] for message in record["prompt"])
+            for record in backend.call_records
+            if record.get("agent") == "P1"
+            and record.get("kind") == "chunk_plan"
+            and "prompt" in record
+        ]
+        self.assertTrue(prompts)
+        for prompt in prompts:
+            # The true ice-sword cell [6,6] must not reach the misled planner.
+            self.assertNotIn("6:6", prompt)
+            self.assertNotIn("semantic_fact_id", prompt)
+            self.assertIn("permanent safety violation", prompt)
+
+    def test_hazard_map_uses_common_safe_status_prompt_without_source_id_leak(
+        self,
+    ) -> None:
+        data = json.loads(ASYMMETRIC_MAP_PATH.read_text())
+        backend = DryRunBackend()
+        run_experiment(
+            data,
+            backend,
+            mode="no-recovery",
+            fault_id=RELEVANT_FAULT,
+            planning_granularity="chunk",
+            chunk_size=3,
+        )
+        prompts = [
+            "".join(message["content"] for message in record["prompt"])
+            for record in backend.call_records
+            if record.get("kind") == "chunk_plan" and "prompt" in record
+        ]
+        self.assertTrue(prompts)
+        self.assertFalse(any("semantic_fact_id" in prompt for prompt in prompts))
+        self.assertTrue(
+            all("permanent safety violation" in prompt for prompt in prompts)
+        )
+        self.assertTrue(all('"hp": 3' in prompt for prompt in prompts))
+        self.assertTrue(
+            all('"shared_objects_enabled": false' in prompt for prompt in prompts)
+        )
+
+    def test_basic_and_extended_maps_share_the_same_system_prompt(self) -> None:
+        def first_chunk_system_prompt(data: dict) -> str:
+            backend = DryRunBackend()
+            run_experiment(
+                data,
+                backend,
+                mode="clean",
+                fault_id=None,
+                planning_granularity="chunk",
+                chunk_size=3,
+            )
+            record = next(
+                item
+                for item in backend.call_records
+                if item.get("kind") == "chunk_plan" and "prompt" in item
+            )
+            return record["prompt"][0]["content"]
+
+        basic = json.loads(MAP_PATH.read_text())
+        extended = json.loads(STATEFUL_MAP_PATH.read_text())
+        self.assertEqual(
+            first_chunk_system_prompt(basic),
+            first_chunk_system_prompt(extended),
+        )
+
+    def test_stateful_missing_weapon_at_visited_cell_does_not_livelock(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        fault = next(
+            item for item in data["faults"] if item["id"] == "f-ice-sword-east-offset"
+        )
+        # [6,5] is on P1's route, so the believed pickup is visited and absent.
+        fault["selection_rule"]["delta"] = [0, -1]
+        result = run_experiment(
+            data,
+            ScriptedBackend(),
+            mode="no-recovery",
+            fault_id="f-ice-sword-east-offset",
+            planning_granularity="chunk",
+            chunk_size=3,
+        )
+        self.assertTrue(result["final_success"])
+        self.assertEqual(result["final_health"], {"P1": 2, "P2": 3})
 
     def test_asymmetric_chunk_smoke_and_relevant_fault(self) -> None:
         data = json.loads(ASYMMETRIC_MAP_PATH.read_text())
@@ -308,6 +800,7 @@ class RecoveryHarnessTest(unittest.TestCase):
         )
         self.assertTrue(result["success"])
         self.assertTrue(result["initial_success"])
+        self.assertTrue(result["full_health_success"])
         self.assertEqual(result["llm_calls"], 0)
         self.assertEqual(
             set(result["latency_ms"]),
@@ -354,13 +847,34 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertTrue(result["final_success"])
         self.assertTrue(result["recovered_success"])
-        self.assertFalse(result["clean_episode_success"])
+        self.assertIsNone(result["clean_episode_success"])
         self.assertTrue(result["ever_failed"])
         self.assertEqual(result["attempt_count"], 2)
         self.assertGreaterEqual(result["trap_entries"], 1)
         self.assertEqual(len(result["attempts"]), 2)
         self.assertIsNotNone(result["latency_ms"]["recovery"])
         self.assertGreaterEqual(result["latency_ms"]["recovery"], 0)
+
+    def test_basic_map_agent_only_restart_cannot_revive_terminal_failure(
+        self,
+    ) -> None:
+        result = run_experiment(
+            self.data,
+            ScriptedBackend(),
+            mode="full-restart",
+            fault_id=RELEVANT_FAULT,
+            planning_granularity="chunk",
+            chunk_size=3,
+            recovery_scope="agent-only",
+        )
+        self.assertFalse(result["initial_success"])
+        self.assertFalse(result["final_success"])
+        self.assertFalse(result["full_health_success"])
+        self.assertEqual(result["final_health"], {"P1": 0, "P2": 3})
+        self.assertEqual(result["irreversible_damage"], 3)
+        self.assertEqual(
+            result["attempts"][1]["failure"]["phase"], "recovery_start"
+        )
 
     def test_full_restart_uses_same_faulty_attempt_for_paired_baseline(self) -> None:
         result = run_experiment(
@@ -371,6 +885,7 @@ class RecoveryHarnessTest(unittest.TestCase):
             detection_delay_ticks=0,
         )
         paired = result["paired_baselines"]
+        restart = paired["full_restart_by_scope"]["environment-reset"]
         self.assertEqual(paired["shared_faulty_trajectory"], "attempt-1")
         self.assertEqual(
             paired["no_recovery"]["success"], result["attempts"][0]["success"]
@@ -380,18 +895,18 @@ class RecoveryHarnessTest(unittest.TestCase):
             sum(result["attempts"][0]["steps"].values()),
         )
         self.assertEqual(paired["detection"]["safety_violations"], 0)
-        self.assertTrue(paired["full_restart"]["success"])
-        self.assertEqual(paired["full_restart"]["trap_entries"], 0)
-        self.assertGreater(paired["full_restart"]["diagnostic_suffix_excluded"], 0)
+        self.assertTrue(restart["success"])
+        self.assertEqual(restart["trap_entries"], 0)
+        self.assertGreater(restart["diagnostic_suffix_excluded"], 0)
         self.assertEqual(
             result["fault_injection_phase"], result["fault_declared_phase"]
         )
         self.assertEqual(result["detection"]["observed_delay_ticks"], 0)
         self.assertGreaterEqual(
-            paired["full_restart"]["wasted_executed_actions"], 1
+            restart["wasted_executed_actions"], 1
         )
-        self.assertGreaterEqual(paired["full_restart"]["wasted_backend_calls"], 1)
-        self.assertIn("total_tokens", paired["full_restart"]["wasted_usage"])
+        self.assertGreaterEqual(restart["wasted_backend_calls"], 1)
+        self.assertIn("total_tokens", restart["wasted_usage"])
 
     def test_fault_metrics_separate_exposure_plan_action_and_harm(self) -> None:
         result = run_experiment(
@@ -747,6 +1262,28 @@ class RecoveryHarnessTest(unittest.TestCase):
         )
         self.assertEqual(plan["actions"], ["RIGHT", "RIGHT", "UP"])
         self.assertEqual(plan["execution_cells"], [[4, 5], [5, 5], [5, 4]])
+        self.assertEqual(plan["speculative_execution_cells"], [])
+
+        frontier_plan = validate_chunk_plan_output(
+            {
+                "actions": ["RIGHT", "RIGHT", "RIGHT"],
+                "waypoint": [6, 5],
+                "declared_dependency_ids": [],
+                "reason": "extend one step beyond the current view",
+            },
+            allowed_dependency_ids=set(),
+            current_cell=(3, 5),
+            target=(3, 3),
+            public_cells=public_cells,
+            available_facts=[],
+            remaining_actions=14,
+            chunk_size=3,
+            grid_dimensions=self.data["dimensions"],
+        )
+        self.assertEqual(frontier_plan["speculative_from_step"], 3)
+        self.assertEqual(
+            frontier_plan["speculative_execution_cells"], [[6, 5]]
+        )
 
         with self.assertRaises(EpisodeError):
             validate_chunk_plan_output(
@@ -764,6 +1301,214 @@ class RecoveryHarnessTest(unittest.TestCase):
                 remaining_actions=14,
                 chunk_size=3,
             )
+
+    def test_chunk_frontier_extension_is_revalidated_each_tick(self) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+
+        class FrontierExtensionBackend(ScriptedBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.forced = False
+
+            def plan(self, **kwargs):
+                if (
+                    not self.forced
+                    and kwargs["planning_granularity"] == "chunk"
+                    and kwargs["agent"] == "P1"
+                    and kwargs["position"] == (2, 5)
+                ):
+                    self.forced = True
+                    self.call_records.append(
+                        {
+                            "backend": "scripted",
+                            "kind": "chunk_plan",
+                            "agent": "P1",
+                            "phase": kwargs["phase"]["id"],
+                        }
+                    )
+                    return {
+                        "actions": ["RIGHT", "RIGHT", "RIGHT"],
+                        "waypoint": [5, 5],
+                        "declared_dependency_ids": [],
+                        "reason": "tentatively extend beyond the current view",
+                    }
+                return super().plan(**kwargs)
+
+        result = run_experiment(
+            data,
+            FrontierExtensionBackend(),
+            mode="clean",
+            fault_id=None,
+            planning_granularity="chunk",
+            chunk_size=3,
+        )
+        self.assertTrue(result["success"])
+        events = result["attempts"][0]["events"]
+        extension = next(
+            event
+            for event in events
+            if event["event_type"] == "chunk_frontier_extension_planned"
+            and event["agent"] == "P1"
+        )
+        self.assertEqual(extension["speculative_from_step"], 3)
+        self.assertEqual(extension["speculative_cells"], [[5, 5]])
+        self.assertFalse(
+            any(
+                event["event_type"] == "plan_interrupted"
+                and event.get("plan_artifact_id")
+                == extension["plan_artifact_id"]
+                for event in events
+            )
+        )
+
+    def test_chunk_frontier_monster_interrupts_only_unforeseen_entry(
+        self,
+    ) -> None:
+        data = json.loads(STATEFUL_MAP_PATH.read_text())
+        # [5, 5] is outside P1's view from its start but visible from [3, 5].
+        data["stateful_world"]["monsters"].append(
+            {
+                "id": "ice-monster-frontier",
+                "monster_type": "ice_monster",
+                "required_weapon": "ice_sword",
+                "cell": [5, 5],
+            }
+        )
+
+        class ForcedChunkBackend(ScriptedBackend):
+            def __init__(self, forced: dict[tuple[int, int], list[str]]) -> None:
+                super().__init__()
+                self.forced = dict(forced)
+
+            def plan(self, **kwargs):
+                actions = (
+                    self.forced.pop(kwargs["position"], None)
+                    if kwargs["agent"] == "P1"
+                    else None
+                )
+                if actions is None:
+                    return super().plan(**kwargs)
+                self.call_records.append(
+                    {
+                        "backend": "scripted",
+                        "kind": "chunk_plan",
+                        "agent": "P1",
+                        "phase": kwargs["phase"]["id"],
+                    }
+                )
+                cursor = kwargs["position"]
+                for action in actions:
+                    dx, dy = MOVES[action]
+                    cursor = cursor[0] + dx, cursor[1] + dy
+                return {
+                    "actions": actions,
+                    "waypoint": list(cursor),
+                    "declared_dependency_ids": [],
+                    "reason": "forced chunk",
+                }
+
+        def run(forced: dict[tuple[int, int], list[str]]) -> list[dict]:
+            result = run_experiment(
+                data,
+                ForcedChunkBackend(forced),
+                mode="clean",
+                fault_id=None,
+                planning_granularity="chunk",
+                chunk_size=3,
+            )
+            return result["attempts"][0]["events"]
+
+        def frontier_damage(events: list[dict]) -> list[dict]:
+            return [
+                event
+                for event in events
+                if event["event_type"] == "monster_damage_taken"
+                and event["agent"] == "P1"
+                and event["cell"] == [5, 5]
+            ]
+
+        with self.subTest("unforeseen monster on speculative suffix"):
+            events = run({(2, 5): ["RIGHT", "RIGHT", "RIGHT"]})
+            extension = next(
+                event
+                for event in events
+                if event["event_type"] == "chunk_frontier_extension_planned"
+                and event["agent"] == "P1"
+            )
+            self.assertEqual(extension["speculative_cells"], [[5, 5]])
+            interruption = next(
+                event
+                for event in events
+                if event["event_type"] == "plan_interrupted"
+                and event["plan_artifact_id"] == extension["plan_artifact_id"]
+            )
+            self.assertEqual(
+                interruption["reason"], "newly_observed_monster_on_remaining_path"
+            )
+            self.assertEqual(interruption["monster_cells"], [[5, 5]])
+            self.assertEqual(interruption["discarded_actions"], ["RIGHT", "RIGHT"])
+            self.assertEqual(frontier_damage(events), [])
+
+        with self.subTest("monster known at planning time is a deliberate entry"):
+            events = run({(2, 5): ["RIGHT"], (3, 5): ["RIGHT", "RIGHT"]})
+            self.assertFalse(
+                any(
+                    event["event_type"] == "plan_interrupted"
+                    and event.get("reason")
+                    == "newly_observed_monster_on_remaining_path"
+                    for event in events
+                )
+            )
+            self.assertEqual(len(frontier_damage(events)), 1)
+
+    def test_chunk_frontier_wall_interrupts_suffix_without_repair(self) -> None:
+        class WallSeekingChunkBackend(ScriptedBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.forced = False
+
+            def plan(self, **kwargs):
+                if (
+                    not self.forced
+                    and kwargs["planning_granularity"] == "chunk"
+                    and kwargs["agent"] == "P1"
+                    and kwargs["position"] == (3, 5)
+                ):
+                    self.forced = True
+                    self.call_records.append(
+                        {
+                            "backend": "scripted",
+                            "kind": "chunk_plan",
+                            "agent": "P1",
+                            "phase": kwargs["phase"]["id"],
+                        }
+                    )
+                    return {
+                        "actions": ["RIGHT", "RIGHT", "RIGHT"],
+                        "waypoint": [6, 5],
+                        "declared_dependency_ids": [],
+                        "reason": "the third cell is outside the current view",
+                    }
+                return super().plan(**kwargs)
+
+        result = run_experiment(
+            self.data,
+            WallSeekingChunkBackend(),
+            mode="clean",
+            fault_id=None,
+            planning_granularity="chunk",
+            chunk_size=3,
+        )
+        self.assertTrue(result["success"])
+        events = result["attempts"][0]["events"]
+        interruption = next(
+            event
+            for event in events
+            if event["event_type"] == "plan_interrupted"
+            and event.get("reason") == "queued_action_revealed_wall"
+        )
+        self.assertEqual(interruption["destination"], [6, 5])
+        self.assertEqual(interruption["discarded_actions"], ["RIGHT"])
 
     def test_coordinate_path_validator_uses_reported_hazards_not_hidden_truth(self) -> None:
         public_cells = visible_public_cells(self.data, (3, 5))
@@ -1872,6 +2617,122 @@ class RecoveryHarnessTest(unittest.TestCase):
         self.assertTrue(backend.call_records[0]["streaming_fallback_used"])
         self.assertEqual(backend.call_records[0]["transport_attempts"], 2)
         self.assertGreaterEqual(backend.call_records[0]["latency_ms"], 0)
+
+    def test_llm_backend_retries_transient_http_error(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": '{"message_facts": [], "note": "ok"}'
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {},
+                    }
+                ).encode()
+
+        rate_limit = urllib.error.HTTPError(
+            url="https://example.invalid/v1/chat/completions",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={"Retry-After": "0"},
+            fp=io.BytesIO(b'{"error":"temporary rate limit"}'),
+        )
+        backend = LLMBackend(
+            url="https://example.invalid/v1/chat/completions",
+            key="test-key",
+            model="test-model",
+        )
+        with patch(
+            "recovery_harness.urllib.request.urlopen",
+            side_effect=[rate_limit, FakeResponse()],
+        ) as mocked, patch("recovery_harness.time.sleep") as sleep:
+            result = backend._chat(
+                kind="communicate",
+                agent="P1",
+                phase="test",
+                messages=[{"role": "system", "content": "return JSON"}],
+            )
+
+        self.assertEqual(result["note"], "ok")
+        self.assertEqual(mocked.call_count, 2)
+        sleep.assert_called_once_with(0.0)
+        record = backend.call_records[0]
+        self.assertEqual(record["transport_attempts"], 2)
+        self.assertEqual(record["transport_retry_count"], 1)
+        self.assertEqual(
+            [item["status"] for item in record["transport_attempt_log"]],
+            ["retry", "ok"],
+        )
+
+    def test_llm_backend_retries_connection_dropped_mid_response(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": '{"message_facts": [], "note": "ok"}'
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {},
+                    }
+                ).encode()
+
+        class TruncatedResponse(FakeResponse):
+            def read(self):
+                raise http.client.IncompleteRead(b'{"choi')
+
+        backend = LLMBackend(
+            url="https://example.invalid/v1/chat/completions",
+            key="test-key",
+            model="test-model",
+        )
+        # urllib does not wrap these in URLError: the first is raised by
+        # getresponse(), the second while the body is read.
+        with patch(
+            "recovery_harness.urllib.request.urlopen",
+            side_effect=[
+                http.client.RemoteDisconnected("closed without response"),
+                TruncatedResponse(),
+                FakeResponse(),
+            ],
+        ) as mocked, patch("recovery_harness.time.sleep") as sleep:
+            result = backend._chat(
+                kind="communicate",
+                agent="P1",
+                phase="test",
+                messages=[{"role": "system", "content": "return JSON"}],
+            )
+
+        self.assertEqual(result["note"], "ok")
+        self.assertEqual(mocked.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 2.0])
+        record = backend.call_records[0]
+        self.assertEqual(record["transport_retry_count"], 2)
+        self.assertEqual(
+            [item["status"] for item in record["transport_attempt_log"]],
+            ["retry", "retry", "ok"],
+        )
 
     def test_redact_secrets_removes_known_key_and_bearer_tokens(self) -> None:
         secret = "unit-test-secret-value-1234"

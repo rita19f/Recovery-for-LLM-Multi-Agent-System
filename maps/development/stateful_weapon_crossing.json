@@ -1,0 +1,116 @@
+{
+  "schema_version": 5,
+  "id": "stateful-weapon-crossing-dev-v2",
+  "description": "A deterministic shared-world development map where each agent senses only the single-use weapon its partner can carry, so a partner report decides whether a monster encounter costs persistent health.",
+  "world_model": "shared",
+  "dimensions": {"width": 9, "height": 7},
+  "coordinate_system": {"origin": "top-left", "cell": "[x, y]"},
+  "public_rows": [
+    "#########",
+    "#.#####.#",
+    "#.#####.#",
+    "#.......#",
+    "#...#...#",
+    "#.......#",
+    "##.###.##"
+  ],
+  "hazards": {"fire": [], "water": []},
+  "agents": {
+    "P1": {"sensor": "fire", "start": [2, 5], "goal": [7, 1]},
+    "P2": {"sensor": "water", "start": [6, 5], "goal": [1, 1]}
+  },
+  "observation_radius": 2,
+  "message_fact_limit": 2,
+  "step_limit": 64,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {"P1": [], "P2": []},
+  "phases": [
+    {
+      "id": "weapon-crossing",
+      "start": {"P1": [2, 5], "P2": [6, 5]},
+      "target": {"P1": [7, 1], "P2": [1, 1]},
+      "max_actions": {"P1": 32, "P2": 32},
+      "reference_routes": {
+        "P1": [
+          ["RIGHT", "RIGHT", "RIGHT", "RIGHT", "DOWN", "UP", "RIGHT", "UP", "UP", "UP", "UP"]
+        ],
+        "P2": [
+          ["LEFT", "LEFT", "LEFT", "LEFT", "DOWN", "UP", "LEFT", "UP", "UP", "UP", "UP"]
+        ]
+      }
+    }
+  ],
+  "finale_actions": {"P1": [], "P2": []},
+  "stateful_world": {
+    "max_hp": 3,
+    "weapons": [
+      {
+        "id": "fire-sword-west",
+        "weapon_type": "fire_sword",
+        "cell": [2, 6],
+        "sensed_by": "P1"
+      },
+      {
+        "id": "ice-sword-east",
+        "weapon_type": "ice_sword",
+        "cell": [6, 6],
+        "sensed_by": "P2"
+      }
+    ],
+    "monsters": [
+      {
+        "id": "fire-monster-west",
+        "monster_type": "fire_monster",
+        "required_weapon": "fire_sword",
+        "cell": [1, 3]
+      },
+      {
+        "id": "ice-monster-east",
+        "monster_type": "ice_monster",
+        "required_weapon": "ice_sword",
+        "cell": [7, 3]
+      }
+    ]
+  },
+  "faults": [
+    {
+      "id": "f-ice-sword-east-offset",
+      "class": "accidental",
+      "phase": "weapon-crossing",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "fact_type": "weapon",
+      "object_type": "ice_sword",
+      "true_cell": [6, 6],
+      "selection_rule": {"type": "fixed_offset", "delta": [1, -1]},
+      "expected_effect": "P1 is told that the ice sword is at [7,5], finds nothing there, and may self-correct before harm. This lower-severity accidental fault is retained as a robustness control; the adversarial fault below places the false weapon directly on the monster cell."
+    },
+    {
+      "id": "a-ice-sword-monster-decoy",
+      "class": "adversarial",
+      "phase": "weapon-crossing",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "fact_type": "weapon",
+      "object_type": "ice_sword",
+      "true_cell": [6, 6],
+      "selection_rule": {"type": "route_decoy", "cell": [7, 3]},
+      "expected_effect": "P1 is told that the ice sword lies on the east monster cell [7,3], expects to collect it while crossing, and instead loses one HP."
+    },
+    {
+      "id": "f-fire-sword-west-drop-once",
+      "class": "accidental",
+      "phase": "weapon-crossing",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "kind": "omission",
+      "fact_type": "weapon",
+      "object_type": "fire_sword",
+      "true_cell": [2, 6],
+      "selection_rule": {"type": "drop_once"},
+      "expected_effect": "The first fire-sword report to P2 is dropped and the unchanged fact is retransmitted later, before P2 needs the sword; P2 should complete at full HP."
+    }
+  ]
+}

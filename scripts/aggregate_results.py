@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+RECOVERY_SCOPES = ("environment-reset", "agent-only")
+
 RUN_FIELDS = [
     "batch_name",
     "run_id",
@@ -31,6 +33,7 @@ RUN_FIELDS = [
     "model",
     "map_id",
     "mode",
+    "recovery_scope",
     "verification_policy",
     "fault_id",
     "fault_class",
@@ -41,22 +44,53 @@ RUN_FIELDS = [
     "detection_phase",
     "detection_tick",
     "observed_detection_delay_ticks",
+    "detection_reason",
+    "detection_trigger_observed",
     "planning_granularity",
     "chunk_size",
     "detection_delay_ticks",
+    "detection_trigger",
     "final_success",
     "initial_success",
+    "initial_full_health_success",
     "clean_episode_success",
+    "full_health_success",
     "recovered_success",
+    "recovery_completed_successfully",
+    "recovery_improved_goal_outcome",
+    "recovery_improved_safe_outcome",
     "ever_failed",
     "recovery_triggered",
     "attempt_count",
     "executed_actions",
     "message_count",
     "trap_entries",
+    "damage_taken",
+    "irreversible_damage",
+    "weapon_pickups",
+    "monsters_defeated",
+    "actual_harness_executed_actions",
+    "actual_harness_message_count",
+    "actual_harness_weapon_pickups",
+    "actual_harness_monsters_defeated",
+    "outcome_path_executed_actions",
+    "outcome_path_message_count",
+    "outcome_path_weapon_pickups",
+    "outcome_path_monsters_defeated",
+    "outcome_path_damage_taken",
+    "outcome_path_backend_calls",
+    "outcome_path_llm_calls",
+    "outcome_path_total_tokens",
+    "final_health",
+    "final_inventory",
+    "alive_monster_ids",
     "safety_violations",
     "backend_calls",
     "llm_calls",
+    "transport_retry_count",
+    "transport_backoff_ms",
+    "plan_repair_calls",
+    "semantic_validation_failures",
     "prompt_tokens",
     "completion_tokens",
     "total_tokens",
@@ -73,12 +107,14 @@ RUN_FIELDS = [
     "fault_structurally_consumed",
     "fault_structured_route_relevant_plan",
     "fault_structured_route_relevant_executed",
+    "fault_caused_harm",
     "fault_caused_failure",
     "affected_stage_count",
     "fault_affected_stages",
     "unauthorized_actions",
     "blocked_unsafe_action_attempts",
     "wasted_executed_actions",
+    "retained_executed_actions",
     "wasted_backend_calls",
     "wasted_llm_calls",
     "wasted_total_tokens",
@@ -122,20 +158,42 @@ GROUP_FIELDS = [
     "model",
     "map_id",
     "mode",
+    "recovery_scope",
     "fault_id",
     "fault_class",
     "planning_granularity",
     "chunk_size",
     "detection_delay_ticks",
+    "detection_trigger",
 ]
 
 METRIC_FIELDS = [
     "trap_entries",
+    "damage_taken",
+    "irreversible_damage",
+    "weapon_pickups",
+    "monsters_defeated",
+    "actual_harness_executed_actions",
+    "actual_harness_message_count",
+    "actual_harness_weapon_pickups",
+    "actual_harness_monsters_defeated",
+    "outcome_path_executed_actions",
+    "outcome_path_message_count",
+    "outcome_path_weapon_pickups",
+    "outcome_path_monsters_defeated",
+    "outcome_path_damage_taken",
+    "outcome_path_backend_calls",
+    "outcome_path_llm_calls",
+    "outcome_path_total_tokens",
     "safety_violations",
     "executed_actions",
     "message_count",
     "backend_calls",
     "llm_calls",
+    "transport_retry_count",
+    "transport_backoff_ms",
+    "plan_repair_calls",
+    "semantic_validation_failures",
     "prompt_tokens",
     "completion_tokens",
     "total_tokens",
@@ -155,6 +213,7 @@ METRIC_FIELDS = [
     "unauthorized_actions",
     "blocked_unsafe_action_attempts",
     "wasted_executed_actions",
+    "retained_executed_actions",
     "wasted_backend_calls",
     "wasted_llm_calls",
     "wasted_total_tokens",
@@ -166,41 +225,59 @@ PAIR_FIELDS = [
     "backend",
     "model",
     "map_id",
+    "recovery_scope",
     "fault_id",
     "fault_class",
     "planning_granularity",
     "chunk_size",
     "detection_delay_ticks",
+    "detection_trigger",
     "fault_declared_phase",
     "fault_injection_phase",
     "fault_injection_tick",
     "detection_phase",
     "detection_tick",
     "observed_detection_delay_ticks",
+    "detection_reason",
+    "detection_trigger_observed",
     "shared_faulty_trajectory",
     "no_recovery_success",
+    "no_recovery_full_health_success",
     "no_recovery_trap_entries",
+    "no_recovery_damage_taken",
     "no_recovery_executed_actions",
     "no_recovery_message_count",
+    "no_recovery_weapon_pickups",
+    "no_recovery_monsters_defeated",
     "no_recovery_backend_calls",
     "no_recovery_llm_calls",
     "no_recovery_total_tokens",
     "no_recovery_latency_ms",
     "full_restart_success",
+    "full_restart_full_health_success",
+    "full_restart_attempt_full_health_success",
     "full_restart_trap_entries",
+    "full_restart_damage_taken",
+    "full_restart_pre_detection_damage",
     "full_restart_executed_actions",
     "full_restart_message_count",
+    "full_restart_weapon_pickups",
+    "full_restart_monsters_defeated",
     "full_restart_backend_calls",
     "full_restart_llm_calls",
     "full_restart_total_tokens",
     "full_restart_latency_ms",
     "full_restart_wasted_executed_actions",
+    "full_restart_retained_executed_actions",
     "full_restart_wasted_backend_calls",
     "full_restart_wasted_llm_calls",
     "full_restart_wasted_total_tokens",
     "delta_trap_entries",
+    "delta_damage_taken",
     "delta_executed_actions",
     "delta_message_count",
+    "delta_weapon_pickups",
+    "delta_monsters_defeated",
     "delta_backend_calls",
     "delta_llm_calls",
     "delta_total_tokens",
@@ -211,35 +288,48 @@ PAIR_GROUP_FIELDS = [
     "backend",
     "model",
     "map_id",
+    "recovery_scope",
     "fault_id",
     "fault_class",
     "planning_granularity",
     "chunk_size",
     "detection_delay_ticks",
+    "detection_trigger",
 ]
 
 PAIR_METRIC_FIELDS = [
     "no_recovery_trap_entries",
+    "no_recovery_damage_taken",
     "no_recovery_executed_actions",
     "no_recovery_message_count",
+    "no_recovery_weapon_pickups",
+    "no_recovery_monsters_defeated",
     "no_recovery_backend_calls",
     "no_recovery_llm_calls",
     "no_recovery_total_tokens",
     "no_recovery_latency_ms",
     "full_restart_trap_entries",
+    "full_restart_damage_taken",
+    "full_restart_pre_detection_damage",
     "full_restart_executed_actions",
     "full_restart_message_count",
+    "full_restart_weapon_pickups",
+    "full_restart_monsters_defeated",
     "full_restart_backend_calls",
     "full_restart_llm_calls",
     "full_restart_total_tokens",
     "full_restart_latency_ms",
     "full_restart_wasted_executed_actions",
+    "full_restart_retained_executed_actions",
     "full_restart_wasted_backend_calls",
     "full_restart_wasted_llm_calls",
     "full_restart_wasted_total_tokens",
     "delta_trap_entries",
+    "delta_damage_taken",
     "delta_executed_actions",
     "delta_message_count",
+    "delta_weapon_pickups",
+    "delta_monsters_defeated",
     "delta_backend_calls",
     "delta_llm_calls",
     "delta_total_tokens",
@@ -254,6 +344,7 @@ FAULT_BOOLEAN_FIELDS = [
     "fault_structurally_consumed",
     "fault_structured_route_relevant_plan",
     "fault_structured_route_relevant_executed",
+    "fault_caused_harm",
     "fault_caused_failure",
 ]
 
@@ -380,9 +471,6 @@ def outcome_to_row(
     detection = episode.get("detection", {}) if isinstance(episode, dict) else {}
     if not isinstance(detection, dict):
         detection = {}
-    paired_baselines = (
-        episode.get("paired_baselines") if isinstance(episode, dict) else None
-    )
     verification_usage = (
         episode.get("verification_usage", {}) if isinstance(episode, dict) else {}
     )
@@ -391,10 +479,14 @@ def outcome_to_row(
         if isinstance(episode, dict)
         else {}
     )
-    restart_pair = (
-        paired_baselines.get("full_restart", {})
-        if isinstance(paired_baselines, dict)
+    actual_harness_work = (
+        episode.get("actual_harness_work", {})
+        if isinstance(episode, dict)
         else {}
+    )
+    # Multi-scope runs have no single outcome path; scope_rows fills it in.
+    outcome_path = (
+        episode.get("outcome_path") or {} if isinstance(episode, dict) else {}
     )
     row_mode = episode.get("mode", condition.get("mode"))
     detection_delay_ticks = episode.get(
@@ -416,6 +508,9 @@ def outcome_to_row(
         "model": batch.get("model"),
         "map_id": episode.get("map_id", condition.get("map_id")),
         "mode": row_mode,
+        "recovery_scope": episode.get(
+            "recovery_scope", condition.get("recovery_scope")
+        ),
         "verification_policy": episode.get("verification_policy"),
         "fault_id": episode.get("fault_id", condition.get("fault_id")),
         "fault_class": episode.get("fault_class", condition.get("fault_class")),
@@ -428,24 +523,79 @@ def outcome_to_row(
         "detection_phase": detection.get("phase"),
         "detection_tick": detection.get("tick"),
         "observed_detection_delay_ticks": detection.get("observed_delay_ticks"),
+        "detection_reason": detection.get("reason"),
+        "detection_trigger_observed": detection.get("trigger_observed"),
         "planning_granularity": episode.get(
             "planning_granularity", condition.get("planning_granularity")
         ),
         "chunk_size": episode.get("chunk_size", condition.get("chunk_size")),
         "detection_delay_ticks": detection_delay_ticks,
+        "detection_trigger": episode.get(
+            "detection_trigger", condition.get("detection_trigger")
+        ),
         "final_success": episode.get("final_success", episode.get("success")),
         "initial_success": episode.get("initial_success"),
+        "initial_full_health_success": episode.get(
+            "initial_full_health_success"
+        ),
         "clean_episode_success": episode.get("clean_episode_success"),
+        "full_health_success": episode.get("full_health_success"),
         "recovered_success": episode.get("recovered_success"),
+        "recovery_completed_successfully": episode.get(
+            "recovery_completed_successfully"
+        ),
+        "recovery_improved_goal_outcome": episode.get(
+            "recovery_improved_goal_outcome"
+        ),
+        "recovery_improved_safe_outcome": episode.get(
+            "recovery_improved_safe_outcome"
+        ),
         "ever_failed": episode.get("ever_failed"),
         "recovery_triggered": episode.get("recovery_triggered"),
         "attempt_count": episode.get("attempt_count"),
         "executed_actions": episode.get("executed_actions"),
         "message_count": episode.get("message_count"),
         "trap_entries": episode.get("trap_entries"),
+        "damage_taken": episode.get("damage_taken"),
+        "irreversible_damage": episode.get("irreversible_damage"),
+        "weapon_pickups": episode.get("weapon_pickups"),
+        "monsters_defeated": episode.get("monsters_defeated"),
+        "actual_harness_executed_actions": actual_harness_work.get(
+            "executed_actions"
+        ),
+        "actual_harness_message_count": actual_harness_work.get("message_count"),
+        "actual_harness_weapon_pickups": actual_harness_work.get(
+            "weapon_pickups"
+        ),
+        "actual_harness_monsters_defeated": actual_harness_work.get(
+            "monsters_defeated"
+        ),
+        "outcome_path_executed_actions": outcome_path.get("executed_actions"),
+        "outcome_path_message_count": outcome_path.get("message_count"),
+        "outcome_path_weapon_pickups": outcome_path.get("weapon_pickups"),
+        "outcome_path_monsters_defeated": outcome_path.get("monsters_defeated"),
+        "outcome_path_damage_taken": outcome_path.get("damage_taken"),
+        "outcome_path_backend_calls": outcome_path.get("backend_calls"),
+        "outcome_path_llm_calls": outcome_path.get("llm_calls"),
+        "outcome_path_total_tokens": nested(outcome_path, "usage", "total_tokens"),
+        "final_health": json.dumps(
+            episode.get("final_health", {}), separators=(",", ":")
+        ),
+        "final_inventory": json.dumps(
+            episode.get("final_inventory", {}), separators=(",", ":")
+        ),
+        "alive_monster_ids": json.dumps(
+            episode.get("alive_monster_ids", []), separators=(",", ":")
+        ),
         "safety_violations": episode.get("safety_violations"),
         "backend_calls": episode.get("backend_calls"),
         "llm_calls": episode.get("llm_calls"),
+        "transport_retry_count": episode.get("transport_retry_count"),
+        "transport_backoff_ms": episode.get("transport_backoff_ms"),
+        "plan_repair_calls": episode.get("plan_repair_calls"),
+        "semantic_validation_failures": episode.get(
+            "semantic_validation_failures"
+        ),
         "prompt_tokens": nested(usage, "prompt_tokens"),
         "completion_tokens": nested(usage, "completion_tokens"),
         "total_tokens": nested(usage, "total_tokens"),
@@ -463,10 +613,11 @@ def outcome_to_row(
         "blocked_unsafe_action_attempts": fault_metrics.get(
             "blocked_unsafe_action_attempts"
         ),
-        "wasted_executed_actions": restart_pair.get("wasted_executed_actions"),
-        "wasted_backend_calls": restart_pair.get("wasted_backend_calls"),
-        "wasted_llm_calls": restart_pair.get("wasted_llm_calls"),
-        "wasted_total_tokens": nested(restart_pair, "wasted_usage", "total_tokens"),
+        "wasted_executed_actions": None,
+        "retained_executed_actions": None,
+        "wasted_backend_calls": None,
+        "wasted_llm_calls": None,
+        "wasted_total_tokens": None,
         "verification_checks": episode.get("verification_checks"),
         "verification_rejections": episode.get("verification_rejections"),
         "verification_llm_calls": episode.get("verification_llm_calls"),
@@ -505,7 +656,86 @@ def outcome_to_row(
         else:
             row[key] = None
     row.update(dependency_columns(episode))
-    return row, paired_baselines if status == "ok" else None
+    return row, episode if status == "ok" else None
+
+
+def restart_columns(row: dict[str, Any], restart: dict[str, Any]) -> dict[str, Any]:
+    """Run-level columns for one restart forked from the shared prefix."""
+    return {
+        "final_success": restart.get("success"),
+        "full_health_success": restart.get("full_health_success"),
+        "irreversible_damage": restart.get("damage_taken"),
+        "recovered_success": restart.get("recovery_improved_goal_outcome"),
+        "recovery_completed_successfully": restart.get(
+            "recovery_completed_successfully"
+        ),
+        "recovery_improved_goal_outcome": restart.get(
+            "recovery_improved_goal_outcome"
+        ),
+        "recovery_improved_safe_outcome": restart.get(
+            "recovery_improved_safe_outcome"
+        ),
+        "ever_failed": (
+            row.get("initial_success") is not True
+            or restart.get("success") is not True
+        ),
+        "attempt_count": 2,
+        "final_health": json.dumps(
+            restart.get("final_health", {}), separators=(",", ":")
+        ),
+        "final_inventory": json.dumps(
+            restart.get("final_inventory", {}), separators=(",", ":")
+        ),
+        "alive_monster_ids": json.dumps(
+            restart.get("alive_monster_ids", []), separators=(",", ":")
+        ),
+        "outcome_path_executed_actions": restart.get("executed_actions"),
+        "outcome_path_message_count": restart.get("message_count"),
+        "outcome_path_weapon_pickups": restart.get("weapon_pickups"),
+        "outcome_path_monsters_defeated": restart.get("monsters_defeated"),
+        "outcome_path_damage_taken": restart.get("damage_taken"),
+        "outcome_path_backend_calls": restart.get("backend_calls"),
+        "outcome_path_llm_calls": restart.get("llm_calls"),
+        "outcome_path_total_tokens": nested(restart, "usage", "total_tokens"),
+        "wasted_executed_actions": restart.get("wasted_executed_actions"),
+        "retained_executed_actions": restart.get("retained_executed_actions"),
+        "wasted_backend_calls": restart.get("wasted_backend_calls"),
+        "wasted_llm_calls": restart.get("wasted_llm_calls"),
+        "wasted_total_tokens": nested(restart, "wasted_usage", "total_tokens"),
+    }
+
+
+def scope_rows(
+    row: dict[str, Any], outcome: dict[str, Any], episode: dict[str, Any] | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a full-restart run into one record per forked recovery scope.
+
+    Errors and runs without an injected fault keep one record per requested
+    scope, so every scope condition retains them in its denominator.
+    """
+    if row.get("mode") != "full-restart":
+        return [row], []
+    condition = outcome.get("condition", {})
+    if not isinstance(condition, dict):
+        condition = {}
+    scopes = (episode or {}).get("recovery_scopes")
+    if not scopes:
+        requested = condition.get("recovery_scope") or row.get("recovery_scope")
+        scopes = list(RECOVERY_SCOPES) if requested == "both" else [requested]
+    paired = (episode or {}).get("paired_baselines")
+    by_scope = (
+        paired.get("full_restart_by_scope", {}) if isinstance(paired, dict) else {}
+    )
+    rows: list[dict[str, Any]] = []
+    pairs: list[dict[str, Any]] = []
+    for scope in scopes:
+        scoped = {**row, "recovery_scope": scope}
+        restart = by_scope.get(scope)
+        if isinstance(restart, dict):
+            scoped.update(restart_columns(scoped, restart))
+            pairs.append(make_paired_row(scoped, paired, restart))
+        rows.append(scoped)
+    return rows, pairs
 
 
 def collect_rows(
@@ -521,10 +751,10 @@ def collect_rows(
         for outcome in outcomes:
             if not isinstance(outcome, dict):
                 continue
-            row, paired = outcome_to_row(batch, batch_path, outcome)
-            rows.append(row)
-            if isinstance(paired, dict):
-                paired_rows.append(make_paired_row(row, paired))
+            row, episode = outcome_to_row(batch, batch_path, outcome)
+            scoped_rows, scoped_pairs = scope_rows(row, outcome, episode)
+            rows.extend(scoped_rows)
+            paired_rows.extend(scoped_pairs)
     return rows, paired_rows
 
 
@@ -578,8 +808,20 @@ def condition_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     for item in group
                     if item["run_status"] == "ok"
                 ),
-                "clean_episode_success_rate_all_runs": round(
-                    sum(item.get("clean_episode_success") is True for item in group)
+                "clean_episode_success_rate_all_runs": (
+                    round(
+                        sum(
+                            item.get("clean_episode_success") is True
+                            for item in group
+                        )
+                        / len(group),
+                        4,
+                    )
+                    if summary.get("mode") == "clean"
+                    else None
+                ),
+                "full_health_success_rate_all_runs": round(
+                    sum(item.get("full_health_success") is True for item in group)
                     / len(group),
                     4,
                 ),
@@ -593,6 +835,30 @@ def condition_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     / len(group),
                     4,
                 ),
+                "recovery_completed_successfully_rate_all_runs": round(
+                    sum(
+                        item.get("recovery_completed_successfully") is True
+                        for item in group
+                    )
+                    / len(group),
+                    4,
+                ),
+                "recovery_improved_goal_outcome_rate_all_runs": round(
+                    sum(
+                        item.get("recovery_improved_goal_outcome") is True
+                        for item in group
+                    )
+                    / len(group),
+                    4,
+                ),
+                "recovery_improved_safe_outcome_rate_all_runs": round(
+                    sum(
+                        item.get("recovery_improved_safe_outcome") is True
+                        for item in group
+                    )
+                    / len(group),
+                    4,
+                ),
                 "ever_failed_rate_all_runs": round(
                     sum(item.get("ever_failed") is True for item in group)
                     / len(group),
@@ -602,6 +868,13 @@ def condition_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     sum(item.get("recovery_triggered") is True for item in group)
                     / len(group),
                     4,
+                ),
+                # Event-triggered conditions fall back to outcome detection
+                # when the event never occurs; report how often it occurred.
+                "detection_trigger_observed_rate_completed": rate(
+                    item.get("detection_trigger_observed")
+                    for item in group
+                    if item["run_status"] == "ok"
                 ),
             }
         )
@@ -694,9 +967,10 @@ def condition_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
-def make_paired_row(row: dict[str, Any], paired: dict[str, Any]) -> dict[str, Any]:
+def make_paired_row(
+    row: dict[str, Any], paired: dict[str, Any], restart: dict[str, Any]
+) -> dict[str, Any]:
     no_recovery = paired.get("no_recovery", {})
-    restart = paired.get("full_restart", {})
     output = {
         field: row.get(field)
         for field in (
@@ -705,31 +979,48 @@ def make_paired_row(row: dict[str, Any], paired: dict[str, Any]) -> dict[str, An
             "backend",
             "model",
             "map_id",
+            "recovery_scope",
             "fault_id",
             "fault_class",
             "planning_granularity",
             "chunk_size",
             "detection_delay_ticks",
+            "detection_trigger",
             "fault_declared_phase",
             "fault_injection_phase",
             "fault_injection_tick",
             "detection_phase",
             "detection_tick",
             "observed_detection_delay_ticks",
+            "detection_reason",
+            "detection_trigger_observed",
         )
     }
     output["shared_faulty_trajectory"] = paired.get("shared_faulty_trajectory")
     for prefix, values in (("no_recovery", no_recovery), ("full_restart", restart)):
         output[f"{prefix}_success"] = values.get("success")
+        output[f"{prefix}_full_health_success"] = values.get(
+            "full_health_success"
+        )
         output[f"{prefix}_trap_entries"] = values.get("trap_entries")
+        output[f"{prefix}_damage_taken"] = values.get("damage_taken")
         output[f"{prefix}_executed_actions"] = values.get("executed_actions")
         output[f"{prefix}_message_count"] = values.get("message_count")
+        output[f"{prefix}_weapon_pickups"] = values.get("weapon_pickups")
+        output[f"{prefix}_monsters_defeated"] = values.get("monsters_defeated")
         output[f"{prefix}_backend_calls"] = values.get("backend_calls")
         output[f"{prefix}_llm_calls"] = values.get("llm_calls")
         output[f"{prefix}_total_tokens"] = nested(values, "usage", "total_tokens")
         output[f"{prefix}_latency_ms"] = values.get("latency_ms")
+    output["full_restart_attempt_full_health_success"] = restart.get(
+        "restart_attempt_full_health_success"
+    )
+    output["full_restart_pre_detection_damage"] = restart.get("pre_detection_damage")
     output["full_restart_wasted_executed_actions"] = restart.get(
         "wasted_executed_actions"
+    )
+    output["full_restart_retained_executed_actions"] = restart.get(
+        "retained_executed_actions"
     )
     output["full_restart_wasted_backend_calls"] = restart.get(
         "wasted_backend_calls"
@@ -740,8 +1031,11 @@ def make_paired_row(row: dict[str, Any], paired: dict[str, Any]) -> dict[str, An
     )
     for metric in (
         "trap_entries",
+        "damage_taken",
         "executed_actions",
         "message_count",
+        "weapon_pickups",
+        "monsters_defeated",
         "backend_calls",
         "llm_calls",
         "total_tokens",
@@ -764,11 +1058,20 @@ def paired_condition_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         summary.update(
             {
                 "n_pairs": len(group),
+                "detection_trigger_observed_rate": rate(
+                    item.get("detection_trigger_observed") for item in group
+                ),
                 "no_recovery_success_rate": rate(
                     item.get("no_recovery_success") for item in group
                 ),
                 "full_restart_success_rate": rate(
                     item.get("full_restart_success") for item in group
+                ),
+                "no_recovery_full_health_success_rate": rate(
+                    item.get("no_recovery_full_health_success") for item in group
+                ),
+                "full_restart_full_health_success_rate": rate(
+                    item.get("full_restart_full_health_success") for item in group
                 ),
             }
         )
@@ -791,13 +1094,22 @@ def failure_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             outcome = "task_failure"
         else:
             outcome = "success"
-        grouped[(row.get("map_id"), row.get("mode"), row.get("fault_id"), outcome)] += 1
+        grouped[
+            (
+                row.get("map_id"),
+                row.get("mode"),
+                row.get("recovery_scope"),
+                row.get("fault_id"),
+                outcome,
+            )
+        ] += 1
     return [
         {
             "map_id": key[0],
             "mode": key[1],
-            "fault_id": key[2],
-            "outcome": key[3],
+            "recovery_scope": key[2],
+            "fault_id": key[3],
+            "outcome": key[4],
             "count": count,
         }
         for key, count in sorted(grouped.items(), key=lambda item: repr(item[0]))
@@ -828,6 +1140,11 @@ def main() -> int:
     rows, paired = collect_rows(batch_paths)
     conditions = condition_rows(rows)
     paired_conditions = paired_condition_rows(paired)
+    # Recovery comparisons conditioned on the requested detection boundary;
+    # the unconditioned table above keeps every pair in its denominator.
+    paired_conditions_observed = paired_condition_rows(
+        [item for item in paired if item.get("detection_trigger_observed") is True]
+    )
     failures = failure_rows(rows)
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -835,19 +1152,29 @@ def main() -> int:
     write_csv(output_dir / "condition_summary.csv", conditions)
     write_csv(output_dir / "paired_recovery.csv", paired, PAIR_FIELDS)
     write_csv(output_dir / "paired_condition_summary.csv", paired_conditions)
+    write_csv(
+        output_dir / "paired_condition_summary_trigger_observed.csv",
+        paired_conditions_observed,
+    )
     write_csv(output_dir / "failure_summary.csv", failures)
 
-    status_counts = Counter(row["run_status"] for row in rows)
+    # A full-restart run that forks several scopes yields one record per scope;
+    # execution status is counted once per executed run.
+    run_statuses = {
+        (row["batch_summary"], row["run_id"]): row["run_status"] for row in rows
+    }
+    status_counts = Counter(run_statuses.values())
     overview = {
         "batch_summaries": [
             f"{path.parent.name}/{path.name}" for path in batch_paths
         ],
+        "planned_runs": len(run_statuses),
         "planned_run_records": len(rows),
         "status_counts": dict(sorted(status_counts.items())),
         "execution_success_rate": (
             None
-            if not rows
-            else round(status_counts.get("ok", 0) / len(rows), 4)
+            if not run_statuses
+            else round(status_counts.get("ok", 0) / len(run_statuses), 4)
         ),
         "task_success_rate_all_runs": (
             None
@@ -864,10 +1191,14 @@ def main() -> int:
         ),
         "clean_episode_success_rate_all_runs": (
             None
-            if not rows
+            if not any(row.get("mode") == "clean" for row in rows)
             else round(
-                sum(row.get("clean_episode_success") is True for row in rows)
-                / len(rows),
+                sum(
+                    row.get("clean_episode_success") is True
+                    for row in rows
+                    if row.get("mode") == "clean"
+                )
+                / sum(row.get("mode") == "clean" for row in rows),
                 4,
             )
         ),
@@ -879,6 +1210,9 @@ def main() -> int:
             "condition_summary": "condition_summary.csv",
             "paired_recovery": "paired_recovery.csv",
             "paired_condition_summary": "paired_condition_summary.csv",
+            "paired_condition_summary_trigger_observed": (
+                "paired_condition_summary_trigger_observed.csv"
+            ),
             "failure_summary": "failure_summary.csv",
         },
     }

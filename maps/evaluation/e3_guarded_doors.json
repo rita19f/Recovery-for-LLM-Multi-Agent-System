@@ -1,0 +1,239 @@
+{
+  "schema_version": 5,
+  "id": "e3-guarded-doors-eval-v2",
+  "description": "each goal compartment has a short door guarded by a monster and a longer monster-free corridor; a reported sword makes the door worthwhile",
+  "world_model": "shared",
+  "dimensions": {
+    "width": 9,
+    "height": 9
+  },
+  "coordinate_system": {
+    "origin": "top-left",
+    "cell": "[x, y]"
+  },
+  "public_rows": [
+    "#########",
+    "#.......#",
+    "#.#####.#",
+    "#.......#",
+    "....#####",
+    "#.......#",
+    "....###.#",
+    "#.......#",
+    "#########"
+  ],
+  "hazards": {
+    "fire": [],
+    "water": []
+  },
+  "agents": {
+    "P1": {
+      "sensor": "fire",
+      "start": [
+        1,
+        4
+      ],
+      "goal": [
+        7,
+        5
+      ]
+    },
+    "P2": {
+      "sensor": "water",
+      "start": [
+        2,
+        4
+      ],
+      "goal": [
+        7,
+        3
+      ]
+    }
+  },
+  "observation_radius": 2,
+  "message_fact_limit": 2,
+  "step_limit": 28,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {
+    "P1": [],
+    "P2": []
+  },
+  "phases": [
+    {
+      "id": "stage-1",
+      "start": {
+        "P1": [
+          1,
+          4
+        ],
+        "P2": [
+          2,
+          4
+        ]
+      },
+      "target": {
+        "P1": [
+          7,
+          5
+        ],
+        "P2": [
+          7,
+          3
+        ]
+      },
+      "max_actions": {
+        "P1": 28,
+        "P2": 26
+      },
+      "reference_routes": {
+        "P1": [
+          [
+            "RIGHT",
+            "RIGHT",
+            "DOWN",
+            "RIGHT",
+            "RIGHT",
+            "RIGHT",
+            "RIGHT"
+          ]
+        ],
+        "P2": [
+          [
+            "UP",
+            "RIGHT",
+            "RIGHT",
+            "RIGHT",
+            "RIGHT",
+            "RIGHT"
+          ]
+        ]
+      }
+    }
+  ],
+  "finale_actions": {
+    "P1": [],
+    "P2": []
+  },
+  "faults": [
+    {
+      "id": "f-ice-sword-1-offset",
+      "class": "accidental",
+      "phase": "stage-1",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "fact_type": "weapon",
+      "object_type": "ice_sword",
+      "true_cell": [
+        0,
+        6
+      ],
+      "kind": "coordinate_shift",
+      "selection_rule": {
+        "type": "fixed_offset",
+        "delta": [
+          3,
+          0
+        ]
+      },
+      "expected_effect": "P1 is told the ice_sword at [0, 6] is offset by [3, 0] and may lose HP crossing an unbeaten monster or waste steps."
+    },
+    {
+      "id": "a-fire-sword-1-monster-decoy",
+      "class": "adversarial",
+      "phase": "stage-1",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "fact_type": "weapon",
+      "object_type": "fire_sword",
+      "true_cell": [
+        0,
+        4
+      ],
+      "kind": "coordinate_shift",
+      "selection_rule": {
+        "type": "route_decoy",
+        "cell": [
+          4,
+          3
+        ]
+      },
+      "expected_effect": "P2 is told the fire_sword at [0, 4] is on the monster cell [4, 3] and may lose HP crossing an unbeaten monster or waste steps."
+    },
+    {
+      "id": "f-ice-sword-1-drop-once",
+      "class": "accidental",
+      "phase": "stage-1",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "fact_type": "weapon",
+      "object_type": "ice_sword",
+      "true_cell": [
+        0,
+        6
+      ],
+      "kind": "omission",
+      "selection_rule": {
+        "type": "drop_once"
+      },
+      "expected_effect": "The first report of ice-sword-1 is dropped and retransmitted unchanged before it is needed; no HP should be lost."
+    }
+  ],
+  "stateful_world": {
+    "max_hp": 3,
+    "weapons": [
+      {
+        "id": "fire-sword-1",
+        "weapon_type": "fire_sword",
+        "cell": [
+          0,
+          4
+        ],
+        "sensed_by": "P1"
+      },
+      {
+        "id": "ice-sword-1",
+        "weapon_type": "ice_sword",
+        "cell": [
+          0,
+          6
+        ],
+        "sensed_by": "P2"
+      }
+    ],
+    "monsters": [
+      {
+        "id": "fire-monster-upper-door",
+        "monster_type": "fire_monster",
+        "required_weapon": "fire_sword",
+        "cell": [
+          4,
+          3
+        ]
+      },
+      {
+        "id": "ice-monster-lower-door",
+        "monster_type": "ice_monster",
+        "required_weapon": "ice_sword",
+        "cell": [
+          4,
+          5
+        ]
+      }
+    ]
+  },
+  "generator": {
+    "script": "scripts/generate_evaluation_maps.py",
+    "version": 1,
+    "template": "e3-guarded-doors",
+    "suite": "extended",
+    "size_class": "small",
+    "seed": 0,
+    "expected_classifications": {
+      "f-ice-sword-1-offset": "plan_relevant_without_execution",
+      "a-fire-sword-1-monster-decoy": "executed_with_harm",
+      "f-ice-sword-1-drop-once": "non_propagating"
+    },
+    "scripted_clean_actions": 21,
+    "rejected_seeds": 0
+  }
+}

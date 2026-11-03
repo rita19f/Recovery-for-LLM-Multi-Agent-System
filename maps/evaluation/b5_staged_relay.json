@@ -1,0 +1,364 @@
+{
+  "schema_version": 4,
+  "id": "b5-staged-relay-eval-v2",
+  "description": "three stages: descend, exchange through a shared zone, climb the partner's ladder; the longest restart prefix",
+  "world_model": "shared",
+  "dimensions": {
+    "width": 11,
+    "height": 9
+  },
+  "coordinate_system": {
+    "origin": "top-left",
+    "cell": "[x, y]"
+  },
+  "public_rows": [
+    "###########",
+    "#...###...#",
+    "#.#.###.#.#",
+    "#...###...#",
+    "#.#.###.#.#",
+    "#.........#",
+    "#.#.#.#.#.#",
+    "#.........#",
+    "###########"
+  ],
+  "hazards": {
+    "fire": [
+      [
+        1,
+        2
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        4,
+        5
+      ]
+    ],
+    "water": [
+      [
+        6,
+        5
+      ],
+      [
+        7,
+        2
+      ],
+      [
+        9,
+        4
+      ]
+    ]
+  },
+  "agents": {
+    "P1": {
+      "sensor": "fire",
+      "start": [
+        1,
+        1
+      ],
+      "goal": [
+        9,
+        1
+      ]
+    },
+    "P2": {
+      "sensor": "water",
+      "start": [
+        9,
+        1
+      ],
+      "goal": [
+        1,
+        1
+      ]
+    }
+  },
+  "observation_radius": 2,
+  "message_fact_limit": 2,
+  "step_limit": 74,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {
+    "P1": [],
+    "P2": []
+  },
+  "phases": [
+    {
+      "id": "stage-1",
+      "start": {
+        "P1": [
+          1,
+          1
+        ],
+        "P2": [
+          9,
+          1
+        ]
+      },
+      "target": {
+        "P1": [
+          3,
+          5
+        ],
+        "P2": [
+          7,
+          5
+        ]
+      },
+      "max_actions": {
+        "P1": 26,
+        "P2": 18
+      },
+      "reference_routes": {
+        "P1": [
+          [
+            "RIGHT",
+            "RIGHT",
+            "DOWN",
+            "DOWN",
+            "LEFT",
+            "LEFT",
+            "DOWN",
+            "DOWN",
+            "RIGHT",
+            "RIGHT"
+          ]
+        ],
+        "P2": [
+          [
+            "DOWN",
+            "DOWN",
+            "LEFT",
+            "LEFT",
+            "DOWN",
+            "DOWN"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "stage-2",
+      "start": {
+        "P1": [
+          3,
+          5
+        ],
+        "P2": [
+          7,
+          5
+        ]
+      },
+      "target": {
+        "P1": [
+          7,
+          5
+        ],
+        "P2": [
+          3,
+          5
+        ]
+      },
+      "max_actions": {
+        "P1": 30,
+        "P2": 30
+      },
+      "reference_routes": {
+        "P1": [
+          [
+            "DOWN",
+            "DOWN",
+            "RIGHT",
+            "RIGHT",
+            "RIGHT",
+            "RIGHT",
+            "UP",
+            "UP"
+          ],
+          [
+            "DOWN",
+            "DOWN",
+            "RIGHT",
+            "RIGHT",
+            "UP",
+            "UP",
+            "RIGHT",
+            "RIGHT"
+          ]
+        ],
+        "P2": [
+          [
+            "DOWN",
+            "DOWN",
+            "LEFT",
+            "LEFT",
+            "LEFT",
+            "LEFT",
+            "UP",
+            "UP"
+          ],
+          [
+            "DOWN",
+            "DOWN",
+            "LEFT",
+            "LEFT",
+            "UP",
+            "UP",
+            "LEFT",
+            "LEFT"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "stage-3",
+      "start": {
+        "P1": [
+          7,
+          5
+        ],
+        "P2": [
+          3,
+          5
+        ]
+      },
+      "target": {
+        "P1": [
+          9,
+          1
+        ],
+        "P2": [
+          1,
+          1
+        ]
+      },
+      "max_actions": {
+        "P1": 18,
+        "P2": 26
+      },
+      "reference_routes": {
+        "P1": [
+          [
+            "UP",
+            "UP",
+            "RIGHT",
+            "RIGHT",
+            "UP",
+            "UP"
+          ],
+          [
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "RIGHT",
+            "RIGHT"
+          ]
+        ],
+        "P2": [
+          [
+            "LEFT",
+            "LEFT",
+            "UP",
+            "UP",
+            "RIGHT",
+            "RIGHT",
+            "UP",
+            "UP",
+            "LEFT",
+            "LEFT"
+          ],
+          [
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "LEFT",
+            "LEFT"
+          ]
+        ]
+      }
+    }
+  ],
+  "finale_actions": {
+    "P1": [],
+    "P2": []
+  },
+  "faults": [
+    {
+      "id": "f-water-stage-1-offset",
+      "class": "accidental",
+      "phase": "stage-1",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "water",
+      "true_cell": [
+        7,
+        2
+      ],
+      "selection_rule": {
+        "type": "fixed_offset",
+        "delta": [
+          2,
+          0
+        ]
+      },
+      "expected_effect": "P1 receives a corrupted water report in stage-1 and may enter the true water trap at [7, 2] in a later stage."
+    },
+    {
+      "id": "a-fire-stage-1-decoy",
+      "class": "adversarial",
+      "phase": "stage-1",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "fire",
+      "true_cell": [
+        1,
+        2
+      ],
+      "selection_rule": {
+        "type": "route_decoy",
+        "cell": [
+          2,
+          5
+        ]
+      },
+      "expected_effect": "P2 receives a corrupted fire report in stage-1 and may enter the true fire trap at [1, 2] in a later stage."
+    },
+    {
+      "id": "f-water-stage-1-drop-once",
+      "class": "accidental",
+      "phase": "stage-1",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "omission",
+      "hazard": "water",
+      "true_cell": [
+        6,
+        5
+      ],
+      "selection_rule": {
+        "type": "drop_once"
+      },
+      "expected_effect": "The first water report about [6, 5] is dropped and retransmitted unchanged; no route should change."
+    }
+  ],
+  "generator": {
+    "script": "scripts/generate_evaluation_maps.py",
+    "version": 1,
+    "template": "b5-staged-relay",
+    "suite": "basic",
+    "size_class": "large",
+    "seed": 11,
+    "expected_classifications": {
+      "f-water-stage-1-offset": "outcome_relevant",
+      "a-fire-stage-1-decoy": "outcome_relevant",
+      "f-water-stage-1-drop-once": "non_propagating"
+    },
+    "scripted_clean_actions": 56,
+    "rejected_seeds": 11
+  }
+}

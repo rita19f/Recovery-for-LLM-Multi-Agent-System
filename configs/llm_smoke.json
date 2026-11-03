@@ -1,0 +1,34 @@
+{
+  "name": "unified-interface-smoke",
+  "description": "Low-cost integration checks for the common prompt and persistent-environment workflow restart.",
+  "expected_endpoint_host": "tritonai-api.ucsd.edu",
+  "expected_model": "api-glm-5.3",
+  "repetitions": 1,
+  "defaults": {
+    "planning_granularity": "chunk",
+    "chunk_size": 3,
+    "request_timeout": 180,
+    "detection_delay_ticks": 0,
+    "recovery_scope": "environment-reset"
+  },
+  "runs": [
+    {
+      "id": "basic-clean",
+      "map": "maps/development/shared_static_traps_small.json",
+      "mode": "clean"
+    },
+    {
+      "id": "extended-clean",
+      "map": "maps/development/stateful_weapon_crossing.json",
+      "mode": "clean"
+    },
+    {
+      "id": "extended-persistent-restart-after-harm",
+      "map": "maps/development/stateful_weapon_crossing.json",
+      "mode": "full-restart",
+      "fault": "a-ice-sword-monster-decoy",
+      "detection_trigger": "after-fault-caused-harm",
+      "recovery_scope": "agent-only"
+    }
+  ]
+}

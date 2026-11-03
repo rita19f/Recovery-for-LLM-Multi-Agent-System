@@ -8,7 +8,8 @@
     "planning_granularity": "chunk",
     "chunk_size": 3,
     "request_timeout": 180,
-    "detection_delay_ticks": 0
+    "detection_delay_ticks": 0,
+    "recovery_scope": "environment-reset"
   },
   "runs": [
     {

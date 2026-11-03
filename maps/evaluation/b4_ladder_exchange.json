@@ -1,0 +1,282 @@
+{
+  "schema_version": 4,
+  "id": "b4-ladder-exchange-eval-v2",
+  "description": "descend one's own ladder, then climb the partner's; hazards reported in stage 1 are first needed in stage 2",
+  "world_model": "shared",
+  "dimensions": {
+    "width": 9,
+    "height": 9
+  },
+  "coordinate_system": {
+    "origin": "top-left",
+    "cell": "[x, y]"
+  },
+  "public_rows": [
+    "#########",
+    "#...#...#",
+    "#.#.#.#.#",
+    "#...#...#",
+    "#.#.#.#.#",
+    "#...#...#",
+    "#.#.#.#.#",
+    "#.......#",
+    "#########"
+  ],
+  "hazards": {
+    "fire": [
+      [
+        1,
+        6
+      ],
+      [
+        3,
+        2
+      ]
+    ],
+    "water": [
+      [
+        7,
+        2
+      ],
+      [
+        7,
+        6
+      ]
+    ]
+  },
+  "agents": {
+    "P1": {
+      "sensor": "fire",
+      "start": [
+        1,
+        1
+      ],
+      "goal": [
+        7,
+        1
+      ]
+    },
+    "P2": {
+      "sensor": "water",
+      "start": [
+        7,
+        1
+      ],
+      "goal": [
+        1,
+        1
+      ]
+    }
+  },
+  "observation_radius": 2,
+  "message_fact_limit": 2,
+  "step_limit": 52,
+  "collision_policy": "non_blocking",
+  "prelude_actions": {
+    "P1": [],
+    "P2": []
+  },
+  "phases": [
+    {
+      "id": "stage-1",
+      "start": {
+        "P1": [
+          1,
+          1
+        ],
+        "P2": [
+          7,
+          1
+        ]
+      },
+      "target": {
+        "P1": [
+          4,
+          7
+        ],
+        "P2": [
+          4,
+          7
+        ]
+      },
+      "max_actions": {
+        "P1": 24,
+        "P2": 24
+      },
+      "reference_routes": {
+        "P1": [
+          [
+            "DOWN",
+            "DOWN",
+            "RIGHT",
+            "RIGHT",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "RIGHT"
+          ]
+        ],
+        "P2": [
+          [
+            "LEFT",
+            "LEFT",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "DOWN",
+            "LEFT"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "stage-2",
+      "start": {
+        "P1": [
+          4,
+          7
+        ],
+        "P2": [
+          4,
+          7
+        ]
+      },
+      "target": {
+        "P1": [
+          7,
+          1
+        ],
+        "P2": [
+          1,
+          1
+        ]
+      },
+      "max_actions": {
+        "P1": 28,
+        "P2": 24
+      },
+      "reference_routes": {
+        "P1": [
+          [
+            "RIGHT",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "RIGHT",
+            "RIGHT"
+          ]
+        ],
+        "P2": [
+          [
+            "LEFT",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "LEFT",
+            "LEFT",
+            "UP",
+            "UP"
+          ],
+          [
+            "LEFT",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "UP",
+            "LEFT",
+            "LEFT"
+          ]
+        ]
+      }
+    }
+  ],
+  "finale_actions": {
+    "P1": [],
+    "P2": []
+  },
+  "faults": [
+    {
+      "id": "f-water-stage-1-offset",
+      "class": "accidental",
+      "phase": "stage-1",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "water",
+      "true_cell": [
+        7,
+        2
+      ],
+      "selection_rule": {
+        "type": "fixed_offset",
+        "delta": [
+          -2,
+          0
+        ]
+      },
+      "expected_effect": "P1 receives a corrupted water report in stage-1 and may enter the true water trap at [7, 2] in a later stage."
+    },
+    {
+      "id": "a-fire-stage-1-decoy",
+      "class": "adversarial",
+      "phase": "stage-1",
+      "source_agent": "P1",
+      "transmission_occurrence": 1,
+      "kind": "coordinate_shift",
+      "hazard": "fire",
+      "true_cell": [
+        3,
+        2
+      ],
+      "selection_rule": {
+        "type": "route_decoy",
+        "cell": [
+          1,
+          3
+        ]
+      },
+      "expected_effect": "P2 receives a corrupted fire report in stage-1 and may enter the true fire trap at [3, 2] in a later stage."
+    },
+    {
+      "id": "f-water-stage-1-drop-once",
+      "class": "accidental",
+      "phase": "stage-1",
+      "source_agent": "P2",
+      "transmission_occurrence": 1,
+      "kind": "omission",
+      "hazard": "water",
+      "true_cell": [
+        7,
+        2
+      ],
+      "selection_rule": {
+        "type": "drop_once"
+      },
+      "expected_effect": "The first water report about [7, 2] is dropped and retransmitted unchanged; no route should change."
+    }
+  ],
+  "generator": {
+    "script": "scripts/generate_evaluation_maps.py",
+    "version": 1,
+    "template": "b4-ladder-exchange",
+    "suite": "basic",
+    "size_class": "medium",
+    "seed": 1,
+    "expected_classifications": {
+      "f-water-stage-1-offset": "outcome_relevant",
+      "a-fire-stage-1-decoy": "outcome_relevant",
+      "f-water-stage-1-drop-once": "non_propagating"
+    },
+    "scripted_clean_actions": 38,
+    "rejected_seeds": 1
+  }
+}

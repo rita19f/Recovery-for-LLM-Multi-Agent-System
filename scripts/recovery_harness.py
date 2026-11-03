@@ -9,14 +9,18 @@ smoke experiments.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
+from heapq import heappop, heappush
+from itertools import count
 from pathlib import Path
 from time import perf_counter_ns
 from typing import Any, Iterable
@@ -34,11 +38,27 @@ HTTP_USER_AGENT = "CSE291A-Grid-Recovery/0.1 (OpenAI-compatible client)"
 MAX_PLAN_REPAIRS = 2
 LOOP_REPETITIONS = 3
 MAX_LOOP_PERIOD = 2
+MAX_TRANSPORT_ATTEMPTS = 3
+TRANSIENT_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+MAX_RETRY_AFTER_SECONDS = 30.0
 
 
 def elapsed_ms(start_ns: int) -> float:
     """Return monotonic elapsed time in milliseconds at logging precision."""
     return round((perf_counter_ns() - start_ns) / 1_000_000, 3)
+
+
+def transport_retry_delay_seconds(
+    attempt_number: int, headers: Any | None = None
+) -> float:
+    """Return a bounded delay before retrying a transient transport failure."""
+    retry_after = headers.get("Retry-After") if headers is not None else None
+    if retry_after is not None:
+        try:
+            return min(MAX_RETRY_AFTER_SECONDS, max(0.0, float(retry_after)))
+        except (TypeError, ValueError):
+            pass
+    return min(MAX_RETRY_AFTER_SECONDS, float(2 ** (attempt_number - 1)))
 
 
 BEARER_TOKEN_PATTERN = re.compile(r"Bearer\s+[^\s'\"\\]+")
@@ -304,6 +324,213 @@ def trap_cells(data: dict[str, Any]) -> dict[str, set[tuple[int, int]]]:
     }
 
 
+def stateful_config(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the optional deterministic health/inventory world extension."""
+    configured = data.get("stateful_world")
+    return configured if isinstance(configured, dict) else None
+
+
+def fact_type(fact: dict[str, Any]) -> str:
+    """Normalize legacy hazard facts and stateful object facts."""
+    return str(fact.get("fact_type", "hazard"))
+
+
+def fact_object_type(fact: dict[str, Any]) -> str:
+    if fact_type(fact) == "hazard":
+        return str(fact.get("object_type", fact.get("hazard", "")))
+    return str(fact.get("object_type", ""))
+
+
+def message_fact_from_source(fact: dict[str, Any]) -> dict[str, Any]:
+    """Build the immutable portion of one inter-agent fact message."""
+    return {
+        "source_fact_id": fact["artifact_id"],
+        "fact_type": fact_type(fact),
+        "object_type": fact_object_type(fact),
+        "cell": list(as_cell(fact["cell"])),
+    }
+
+
+def fact_blocks_navigation(fact: dict[str, Any]) -> bool:
+    """Return whether the public checker must reject traversing this fact cell."""
+    return fact_type(fact) == "hazard"
+
+
+def fault_matches_fact(fault: dict[str, Any], fact: dict[str, Any]) -> bool:
+    expected_type = str(fault.get("fact_type", "hazard"))
+    expected_object = str(fault.get("object_type", fault.get("hazard", "")))
+    return (
+        fact_type(fact) == expected_type
+        and fact_object_type(fact) == expected_object
+        and as_cell(fact["cell"]) == as_cell(fault["true_cell"])
+    )
+
+
+def fault_relevance_cells(
+    data: dict[str, Any], fault: dict[str, Any]
+) -> set[tuple[int, int]]:
+    """Return cells whose appearance in a plan makes the fault route-relevant.
+
+    A hazard fault matters when a plan enters the true trap. A weapon fault
+    matters when a plan relies on the weapon: it heads for the reported pickup
+    cell or crosses a monster that requires that weapon type.
+    """
+    if str(fault.get("fact_type", "hazard")) != "weapon":
+        return {as_cell(fault["true_cell"])}
+    configured = stateful_config(data) or {}
+    weapon_type = fault.get("object_type")
+    cells = {
+        as_cell(monster["cell"])
+        for monster in configured.get("monsters", [])
+        if monster.get("required_weapon") == weapon_type
+    }
+    if fault.get("kind") == "coordinate_shift":
+        cells.add(resolve_faulty_cell(fault))
+    return cells
+
+
+def can_pick_up_weapon(weapon: dict[str, Any], agent: str) -> bool:
+    """Sensing is not use: an agent may carry only weapons it cannot sense.
+
+    The sensing agent acts as the reporter and its partner as the executor, so
+    a weapon has exactly one possible holder and cannot be taken or used by the
+    agent that observed it.
+    """
+    return weapon.get("sensed_by") != agent
+
+
+def initial_runtime_state(data: dict[str, Any]) -> dict[str, Any]:
+    """Create fresh attempt-local mutable state for health and shared objects."""
+    configured = stateful_config(data)
+    if configured is None:
+        return {
+            "enabled": False,
+            # Health is part of the common agent interface on every map.  In
+            # basic hazard maps traps are terminal, so successful arrival and
+            # full-health arrival remain equivalent.
+            "max_hp": 3,
+            "health": {agent: 3 for agent in AGENTS},
+            "inventory": {agent: [] for agent in AGENTS},
+            "available_weapons": {},
+            "alive_monsters": {},
+            "collected_cells": {agent: set() for agent in AGENTS},
+            "world_version": 0,
+            "agent_state_versions": {agent: 0 for agent in AGENTS},
+        }
+    max_hp = int(configured["max_hp"])
+    return {
+        "enabled": True,
+        "max_hp": max_hp,
+        "health": {agent: max_hp for agent in AGENTS},
+        # Weapons are single-use, so inventories are multisets of weapon types.
+        "inventory": {agent: [] for agent in AGENTS},
+        "available_weapons": {
+            item["id"]: deepcopy(item) for item in configured.get("weapons", [])
+        },
+        "alive_monsters": {
+            item["id"]: deepcopy(item) for item in configured.get("monsters", [])
+        },
+        "collected_cells": {agent: set() for agent in AGENTS},
+        "world_version": 0,
+        "agent_state_versions": {agent: 0 for agent in AGENTS},
+    }
+
+
+def physical_recovery_snapshot(
+    *,
+    runtime: dict[str, Any],
+    positions: dict[str, tuple[int, int]],
+    step_state: dict[str, int],
+    phase_index: int,
+    phase_id: str,
+    phase_steps: dict[str, int],
+) -> dict[str, Any]:
+    """Serialize the external state that an agent-only restart cannot undo."""
+    snapshot: dict[str, Any] = {
+        "positions": {agent: list(positions[agent]) for agent in AGENTS},
+        "step_state": {agent: int(step_state[agent]) for agent in AGENTS},
+        "phase_index": int(phase_index),
+        "phase_id": phase_id,
+        "phase_steps": {agent: int(phase_steps[agent]) for agent in AGENTS},
+        "stateful_world": bool(runtime.get("enabled")),
+        "max_hp": int(runtime["max_hp"]),
+        "health": {agent: int(runtime["health"][agent]) for agent in AGENTS},
+        "inventory": {
+            agent: list(runtime["inventory"][agent]) for agent in AGENTS
+        },
+        "available_weapon_ids": sorted(runtime["available_weapons"]),
+        "alive_monster_ids": sorted(runtime["alive_monsters"]),
+        "world_version": int(runtime["world_version"]),
+        "agent_state_versions": {
+            agent: int(runtime["agent_state_versions"][agent]) for agent in AGENTS
+        },
+    }
+    return snapshot
+
+
+def restore_physical_state(
+    data: dict[str, Any], snapshot: dict[str, Any]
+) -> tuple[
+    dict[str, Any],
+    dict[str, tuple[int, int]],
+    dict[str, int],
+    int,
+    dict[str, int],
+]:
+    """Restore external state while intentionally discarding agent memory/plans."""
+    runtime = initial_runtime_state(data)
+    positions = {
+        agent: as_cell(snapshot["positions"][agent]) for agent in AGENTS
+    }
+    step_state = {
+        agent: int(snapshot.get("step_state", {}).get(agent, 0)) for agent in AGENTS
+    }
+    phase_index = int(snapshot.get("phase_index", 0))
+    phase_steps = {
+        agent: int(snapshot.get("phase_steps", {}).get(agent, 0))
+        for agent in AGENTS
+    }
+    runtime["health"] = {
+        agent: int(snapshot["health"][agent]) for agent in AGENTS
+    }
+    runtime["inventory"] = {
+        agent: list(snapshot["inventory"][agent]) for agent in AGENTS
+    }
+    available_ids = set(snapshot.get("available_weapon_ids", []))
+    runtime["available_weapons"] = {
+        weapon_id: weapon
+        for weapon_id, weapon in runtime["available_weapons"].items()
+        if weapon_id in available_ids
+    }
+    alive_ids = set(snapshot.get("alive_monster_ids", []))
+    runtime["alive_monsters"] = {
+        monster_id: monster
+        for monster_id, monster in runtime["alive_monsters"].items()
+        if monster_id in alive_ids
+    }
+    runtime["world_version"] = int(snapshot.get("world_version", 0))
+    runtime["agent_state_versions"] = {
+        agent: int(snapshot.get("agent_state_versions", {}).get(agent, 0))
+        for agent in AGENTS
+    }
+    # These are agent-local memories rather than external state. The restarted
+    # agents must rediscover absence/pickups from the preserved world.
+    runtime["collected_cells"] = {agent: set() for agent in AGENTS}
+    return runtime, positions, step_state, phase_index, phase_steps
+
+
+def runtime_agent_status(runtime: dict[str, Any], agent: str) -> dict[str, Any]:
+    return {
+        "stateful_world": bool(runtime.get("enabled")),
+        "shared_objects_enabled": bool(runtime.get("enabled")),
+        "hp": runtime["health"][agent],
+        "max_hp": runtime["max_hp"],
+        "inventory": sorted(runtime["inventory"][agent]),
+        "agent_state_version": runtime["agent_state_versions"][agent],
+        "shared_world_version": runtime["world_version"],
+    }
+
+
 def tile_at(data: dict[str, Any], cell: tuple[int, int]) -> str:
     x, y = cell
     return data["public_rows"][y][x]
@@ -316,8 +543,8 @@ def in_bounds(data: dict[str, Any], cell: tuple[int, int]) -> bool:
 
 def validate_map(data: dict[str, Any]) -> dict[str, Any]:
     schema_version = data.get("schema_version")
-    if schema_version not in {3, 4}:
-        raise MapValidationError("environment requires schema_version 3 or 4")
+    if schema_version not in {3, 4, 5}:
+        raise MapValidationError("environment requires schema_version 3, 4, or 5")
     if data.get("world_model") != "shared":
         raise MapValidationError("shared-world schemas require world_model='shared'")
     width = data["dimensions"]["width"]
@@ -354,6 +581,71 @@ def validate_map(data: dict[str, Any]) -> dict[str, Any]:
                 raise MapValidationError(f"{hazard} trap {cell} is not on open terrain")
             if cell in set(starts.values()) | set(goals.values()):
                 raise MapValidationError(f"{hazard} trap may not occupy an agent start/goal")
+
+    configured_state = stateful_config(data)
+    stateful_summary: dict[str, Any] | None = None
+    if configured_state is not None:
+        max_hp = configured_state.get("max_hp")
+        if not isinstance(max_hp, int) or max_hp < 1:
+            raise MapValidationError("stateful_world.max_hp must be a positive integer")
+        weapons = configured_state.get("weapons", [])
+        monsters = configured_state.get("monsters", [])
+        if not isinstance(weapons, list) or not isinstance(monsters, list):
+            raise MapValidationError("stateful_world weapons and monsters must be lists")
+        weapon_ids: set[str] = set()
+        weapon_types: set[str] = set()
+        occupied_state_cells: set[tuple[int, int]] = set()
+        for weapon in weapons:
+            weapon_id = weapon.get("id")
+            weapon_type = weapon.get("weapon_type")
+            sensed_by = weapon.get("sensed_by")
+            cell = as_cell(weapon.get("cell", []))
+            if not isinstance(weapon_id, str) or not weapon_id or weapon_id in weapon_ids:
+                raise MapValidationError("stateful weapons require unique non-empty ids")
+            if not isinstance(weapon_type, str) or not weapon_type:
+                raise MapValidationError(f"weapon {weapon_id} requires weapon_type")
+            if sensed_by not in AGENTS:
+                raise MapValidationError(f"weapon {weapon_id} requires sensed_by P1 or P2")
+            if not in_bounds(data, cell) or tile_at(data, cell) == "#":
+                raise MapValidationError(f"weapon {weapon_id} is not on open terrain")
+            if cell in occupied_state_cells:
+                raise MapValidationError("stateful objects may not overlap")
+            weapon_ids.add(weapon_id)
+            weapon_types.add(weapon_type)
+            occupied_state_cells.add(cell)
+        monster_ids: set[str] = set()
+        for monster in monsters:
+            monster_id = monster.get("id")
+            monster_type = monster.get("monster_type")
+            required_weapon = monster.get("required_weapon")
+            cell = as_cell(monster.get("cell", []))
+            if not isinstance(monster_id, str) or not monster_id or monster_id in monster_ids:
+                raise MapValidationError("stateful monsters require unique non-empty ids")
+            if not isinstance(monster_type, str) or not monster_type:
+                raise MapValidationError(f"monster {monster_id} requires monster_type")
+            if required_weapon not in weapon_types:
+                raise MapValidationError(
+                    f"monster {monster_id} requires unknown weapon {required_weapon!r}"
+                )
+            if not in_bounds(data, cell) or tile_at(data, cell) == "#":
+                raise MapValidationError(f"monster {monster_id} is not on open terrain")
+            if cell in occupied_state_cells:
+                raise MapValidationError("stateful objects may not overlap")
+            monster_ids.add(monster_id)
+            occupied_state_cells.add(cell)
+        # Pickup and combat resolve on cell entry, so an object on a start cell
+        # would never trigger; objects on traps or goals would be ambiguous.
+        if occupied_state_cells & (
+            set(starts.values()) | set(goals.values()) | flat_traps
+        ):
+            raise MapValidationError(
+                "stateful objects may not occupy an agent start/goal or a trap"
+            )
+        stateful_summary = {
+            "max_hp": max_hp,
+            "weapon_ids": sorted(weapon_ids),
+            "monster_ids": sorted(monster_ids),
+        }
 
     phases = data["phases"]
     if not phases:
@@ -471,9 +763,35 @@ def validate_map(data: dict[str, Any]) -> dict[str, Any]:
                 f"fault {fault['id']} transmission_occurrence must be positive"
             )
         true_cell = as_cell(fault["true_cell"])
-        if true_cell not in traps[fault["hazard"]]:
+        fault_fact_type = str(fault.get("fact_type", "hazard"))
+        if fault_fact_type == "hazard":
+            hazard = fault.get("hazard")
+            if hazard not in traps or true_cell not in traps[hazard]:
+                raise MapValidationError(
+                    f"fault {fault['id']} true_cell is not a {hazard} trap"
+                )
+        elif fault_fact_type == "weapon":
+            if configured_state is None:
+                raise MapValidationError(
+                    f"fault {fault['id']} references a weapon without stateful_world"
+                )
+            matches = [
+                weapon
+                for weapon in configured_state.get("weapons", [])
+                if weapon.get("weapon_type") == fault.get("object_type")
+                and as_cell(weapon["cell"]) == true_cell
+            ]
+            if not matches:
+                raise MapValidationError(
+                    f"fault {fault['id']} true_cell is not the configured weapon"
+                )
+            if matches[0].get("sensed_by") != fault["source_agent"]:
+                raise MapValidationError(
+                    f"fault {fault['id']} source_agent cannot sense the weapon"
+                )
+        else:
             raise MapValidationError(
-                f"fault {fault['id']} true_cell is not a {fault['hazard']} trap"
+                f"fault {fault['id']} has unsupported fact_type {fault_fact_type!r}"
             )
         if fault["kind"] == "coordinate_shift":
             faulty_cell = resolve_faulty_cell(fault)
@@ -522,6 +840,7 @@ def validate_map(data: dict[str, Any]) -> dict[str, Any]:
         "goals": {agent: list(cell) for agent, cell in goals.items()},
         "fire_traps": [list(cell) for cell in sorted(traps["fire"])],
         "water_traps": [list(cell) for cell in sorted(traps["water"])],
+        "stateful_world": stateful_summary,
         "phases": phase_summaries,
         "fault_ids": sorted(fault_ids),
         "passed": True,
@@ -631,9 +950,9 @@ def annotated_public_view(
     ys = sorted({cell[1] for cell in tiles})
     visited = {as_cell(cell) for cell in visited_cells}
     hazards = {
-        as_cell(fact["cell"]): "F" if fact["hazard"] == "fire" else "W"
+        as_cell(fact["cell"]): "F" if fact_object_type(fact) == "fire" else "W"
         for fact in available_facts
-        if as_cell(fact["cell"]) in tiles
+        if fact_type(fact) == "hazard" and as_cell(fact["cell"]) in tiles
     }
 
     def symbol(cell: tuple[int, int]) -> str:
@@ -794,6 +1113,144 @@ def shortest_transition_route(
     return None
 
 
+def stateful_transition_route(
+    *,
+    start: tuple[int, int],
+    target: tuple[int, int],
+    transitions: dict[tuple[int, int], dict[str, list[int]]],
+    available_facts: list[dict[str, Any]],
+    inventory: Iterable[str],
+    hp: int,
+    visited: Iterable[tuple[int, int]] = (),
+) -> dict[str, list[Any]] | None:
+    """Plan a visible route while modeling single-use pickups and combat.
+
+    The search uses only facts available to the planner. Policy order: a
+    damage-free route to the target, otherwise fetch the nearest believed
+    weapon, otherwise a route that loses HP but keeps the agent alive.
+    Consequently, a corrupted weapon coordinate can produce a route that is
+    safe in the planner's model but causes damage in the simulator.
+    """
+    blocked = {
+        as_cell(fact["cell"])
+        for fact in available_facts
+        if fact_blocks_navigation(fact)
+    }
+    # Only weapons this agent may carry, and has neither collected nor found
+    # missing on a visit, are believed to exist.
+    weapons = {
+        as_cell(fact["cell"]): fact_object_type(fact)
+        for fact in available_facts
+        if fact_type(fact) == "weapon"
+        and fact.get("usable_by_you")
+        and fact.get("pickup_status") == "unverified"
+    }
+    monsters = {
+        as_cell(fact["cell"]): str(fact.get("required_weapon", ""))
+        for fact in available_facts
+        if fact_type(fact) == "monster"
+    }
+    visited_cells = set(visited)
+
+    def search(
+        goal: tuple[int, int], max_damage: int
+    ) -> tuple[bool, dict[str, list[Any]] | None]:
+        # State: cell, held weapon multiset, collected weapon cells, defeated
+        # monster cells.  Cost: (damage, steps), minimized lexicographically.
+        start_state = (start, tuple(sorted(inventory)), frozenset(), frozenset())
+        costs = {start_state: (0, 0)}
+        parents: dict[Any, Any] = {start_state: None}
+        order = count()
+        frontier = [((0, 0), next(order), start_state)]
+        goal_state = None
+        while frontier:
+            cost, _, state = heappop(frontier)
+            if cost != costs[state]:
+                continue
+            cell, held, collected, defeated = state
+            if cell == goal:
+                goal_state = state
+                break
+            for action, raw_destination in transitions.get(cell, {}).items():
+                destination = as_cell(raw_destination)
+                if destination in blocked:
+                    continue
+                next_held = list(held)
+                next_collected = collected
+                next_defeated = defeated
+                damage = cost[0]
+                # Mirror the simulator: pickup resolves before combat.
+                if destination in weapons and destination not in collected:
+                    next_held.append(weapons[destination])
+                    next_collected = collected | {destination}
+                required = monsters.get(destination)
+                if required and destination not in defeated:
+                    if required in next_held:
+                        next_held.remove(required)
+                        next_defeated = defeated | {destination}
+                    else:
+                        damage += 1
+                if damage > max_damage:
+                    continue
+                next_state = (
+                    destination,
+                    tuple(sorted(next_held)),
+                    next_collected,
+                    next_defeated,
+                )
+                next_cost = (damage, cost[1] + 1)
+                if next_state in costs and costs[next_state] <= next_cost:
+                    continue
+                costs[next_state] = next_cost
+                parents[next_state] = (state, action)
+                heappush(frontier, (next_cost, next(order), next_state))
+        reached = goal_state is not None
+        if goal_state is None:
+            candidates = [state for state in parents if state[0] != start]
+            if not candidates:
+                return False, None
+            goal_state = min(
+                candidates,
+                key=lambda state: (
+                    costs[state][0],
+                    state[0] in visited_cells,
+                    abs(state[0][0] - goal[0]) + abs(state[0][1] - goal[1]),
+                    costs[state][1],
+                    state[0][1],
+                    state[0][0],
+                ),
+            )
+        actions: list[str] = []
+        cells: list[list[int]] = []
+        cursor = goal_state
+        while parents[cursor] is not None:
+            previous, action = parents[cursor]
+            actions.append(action)
+            cells.append(list(cursor[0]))
+            cursor = previous
+        actions.reverse()
+        cells.reverse()
+        return reached, {"actions": actions, "cells": cells}
+
+    reached, route = search(target, 0)
+    if reached:
+        return route
+    if weapons:
+        nearest = min(
+            weapons,
+            key=lambda cell: (
+                abs(cell[0] - start[0]) + abs(cell[1] - start[1]),
+                cell[1],
+                cell[0],
+            ),
+        )
+        _, fetch = search(nearest, 0)
+        if fetch is not None and fetch["actions"]:
+            return fetch
+    _, risky = search(target, max(0, hp - 1))
+    return risky
+
+
 def visible_progress_route(
     *,
     start: tuple[int, int],
@@ -866,7 +1323,11 @@ def decision_error(
             f"next_action {next_action!r} is not a candidate; choose one of "
             f"{sorted(candidate_moves)}"
         )
-    known_hazards = {as_cell(fact["cell"]) for fact in available_facts}
+    known_hazards = {
+        as_cell(fact["cell"])
+        for fact in available_facts
+        if fact_blocks_navigation(fact)
+    }
     destination = as_cell(candidate_moves[next_action])
     visited = {as_cell(cell) for cell in visited_cells}
     unexplored_safe_actions = [
@@ -901,7 +1362,12 @@ def decision_error(
 
 
 def make_sensor_facts(
-    data: dict[str, Any], agent: str, position: tuple[int, int], attempt: str, phase: str
+    data: dict[str, Any],
+    agent: str,
+    position: tuple[int, int],
+    attempt: str,
+    phase: str,
+    available_weapons: Iterable[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     sensor = data["agents"][agent]["sensor"]
     radius = data["observation_radius"]
@@ -914,13 +1380,78 @@ def make_sensor_facts(
                     # phase/tick at which it was observed belongs to observation
                     # events, not to the fact identity itself.
                     "artifact_id": f"{attempt}:fact:{agent}:{sensor}:{cell[0]}:{cell[1]}",
+                    "fact_type": "hazard",
+                    "object_type": sensor,
                     "hazard": sensor,
                     "cell": list(cell),
                     "source_agent": agent,
                     "first_observed_phase": phase,
                 }
             )
+    configured = stateful_config(data)
+    if configured is not None:
+        # Collected weapons have left the world and can no longer be sensed.
+        weapons = (
+            configured.get("weapons", [])
+            if available_weapons is None
+            else available_weapons
+        )
+        for weapon in weapons:
+            cell = as_cell(weapon["cell"])
+            if weapon.get("sensed_by") != agent:
+                continue
+            if max(abs(cell[0] - position[0]), abs(cell[1] - position[1])) <= radius:
+                visible.append(
+                    {
+                        "artifact_id": (
+                            f"{attempt}:fact:{agent}:weapon:"
+                            f"{weapon['weapon_type']}:{cell[0]}:{cell[1]}"
+                        ),
+                        "fact_type": "weapon",
+                        "object_type": weapon["weapon_type"],
+                        "cell": list(cell),
+                        "source_agent": agent,
+                        "first_observed_phase": phase,
+                    }
+                )
     return visible
+
+
+def visible_monster_facts(
+    data: dict[str, Any],
+    *,
+    agent: str,
+    position: tuple[int, int],
+    attempt: str,
+    runtime: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Expose nearby live monsters as public, non-message state facts.
+
+    A live monster has a single observable state, so its fact identity is per
+    object rather than tied to the global world version; unrelated pickups or
+    defeats elsewhere do not re-identify it.
+    """
+    if not runtime.get("enabled"):
+        return []
+    radius = data["observation_radius"]
+    facts = []
+    for monster in runtime["alive_monsters"].values():
+        cell = as_cell(monster["cell"])
+        if max(abs(cell[0] - position[0]), abs(cell[1] - position[1])) <= radius:
+            facts.append(
+                {
+                    "artifact_id": (
+                        f"{attempt}:world:monster:{monster['id']}:seen-by:{agent}"
+                    ),
+                    "fact_type": "monster",
+                    "object_type": monster["monster_type"],
+                    "required_weapon": monster["required_weapon"],
+                    "cell": list(cell),
+                    "source_agent": "shared_world",
+                    "world_version": runtime["world_version"],
+                }
+            )
+    return facts
 
 
 def communication_messages(
@@ -942,9 +1473,11 @@ def communication_messages(
                 "you have complementary private hazard sensors. The supplied sensor_facts are "
                 "pending facts that have not yet been delivered to your partner. Select at least "
                 "one and at most message_fact_limit facts. Do not invent, repeat, or alter "
-                "coordinates. Return JSON "
-                "only: {\"message_facts\":[{\"source_fact_id\":str,\"hazard\":\"fire|water\","
-                "\"cell\":[x,y]}],\"note\":str}."
+                "coordinates or object types. A fact_type is hazard or weapon; object_type is "
+                "fire, water, fire_sword, or ice_sword. You cannot carry a weapon your own "
+                "sensor detects; only your partner can use it, so report it. Return JSON only: "
+                "{\"message_facts\":[{\"source_fact_id\":str,\"fact_type\":str,"
+                "\"object_type\":str,\"cell\":[x,y]}],\"note\":str}."
             ),
         },
         {"role": "user", "content": json.dumps(payload, sort_keys=True)},
@@ -978,8 +1511,8 @@ def verification_messages(
             "content": (
                 "You verify one structured inter-agent message against immutable trusted "
                 "sensor facts. The candidate is valid only when it contains exactly the "
-                "same source_fact_id, hazard, and [x,y] cell values as the trusted facts: "
-                "no changed coordinate, changed hazard, invented fact, or omitted fact. "
+                "same source_fact_id, fact_type, object_type, and [x,y] cell values as the "
+                "trusted facts: no changed coordinate or object, invented fact, or omitted fact. "
                 "Return JSON only: {\"valid\":bool,\"reason\":str}. Keep reason under "
                 "160 characters."
             ),
@@ -1002,6 +1535,7 @@ def planning_messages(
     planning_granularity: str,
     chunk_size: int = 3,
     last_action_feedback: dict[str, Any] | None = None,
+    agent_status: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     payload = {
         "agent": agent,
@@ -1027,6 +1561,16 @@ def planning_messages(
         "current_cell": list(position),
         "segment_target": phase["target"],
         "remaining_actions": remaining_actions,
+        "agent_status": agent_status
+        or {
+            "stateful_world": False,
+            "shared_objects_enabled": False,
+            "hp": 3,
+            "max_hp": 3,
+            "inventory": [],
+            "agent_state_version": 0,
+            "shared_world_version": 0,
+        },
         "annotated_local_map": annotated_public_view(
             public_cells=public_cells,
             position=position,
@@ -1034,13 +1578,17 @@ def planning_messages(
             available_facts=available_facts,
             visited_cells=visited_cells,
         ),
-        "available_hazard_facts": available_facts,
+        "available_facts": available_facts,
+        "available_hazard_facts": [
+            fact for fact in available_facts if fact_type(fact) == "hazard"
+        ],
     }
     if planning_granularity == "route":
         payload["known_forbidden_cells"] = sorted(
             {
                 tuple(fact["cell"])
                 for fact in available_facts
+                if fact_blocks_navigation(fact)
             },
             key=lambda cell: (cell[1], cell[0]),
         )
@@ -1068,14 +1616,18 @@ def planning_messages(
             "meaningful intermediate milestone or branch chosen. Before answering, verify each "
             "next cell is in the current cell's neighbors list and no path cell appears in "
             "known_forbidden_cells. "
-            "Dependency IDs must be copied from dependency_id fields of hazard facts that "
+            "Dependency IDs must be copied from dependency_id fields of facts that "
             "influenced the route choice. Keep subgoal and reason concise."
         )
     elif planning_granularity == "chunk":
         chunk_action_limit = min(chunk_size, remaining_actions)
         payload["chunk_action_limit"] = chunk_action_limit
         payload["known_forbidden_cells"] = sorted(
-            {tuple(fact["cell"]) for fact in available_facts},
+            {
+                tuple(fact["cell"])
+                for fact in available_facts
+                if fact_blocks_navigation(fact)
+            },
             key=lambda cell: (cell[1], cell[0]),
         )
         payload["known_forbidden_cells"] = [
@@ -1087,14 +1639,18 @@ def planning_messages(
         task_instruction = (
             "Plan the next short open-loop navigation chunk. Choose the primitive actions "
             "yourself and output them directly in execution order. The simulator will execute "
-            "exactly those actions, then return a fresh observation before the next chunk. "
+            "at most those actions, refreshing observations before every primitive step. "
+            "The first action must be a currently observed legal edge. Later actions may "
+            "tentatively extend beyond the current observed map; each will be checked against "
+            "the refreshed view before execution, and the remaining suffix will be discarded "
+            "if a wall, hazard, or conflicting fact becomes visible. "
             "Choose between one and chunk_action_limit actions. Stop early if the actions reach "
             "segment_target. waypoint must be the exact cell reached after all actions."
         )
         output_instruction = (
             "Return JSON only: {\"actions\":[\"UP|DOWN|LEFT|RIGHT\",...],"
             "\"waypoint\":[x,y],\"declared_dependency_ids\":[...],\"reason\":str}. "
-            "Dependency IDs must be copied from dependency_id fields of hazard facts that "
+            "Dependency IDs must be copied from dependency_id fields of facts that "
             "influenced the action chunk. Keep reason concise and under 160 characters."
         )
     elif planning_granularity == "junction":
@@ -1118,7 +1674,7 @@ def planning_messages(
         output_instruction = (
             "Return JSON only: {\"next_action\":\"UP|DOWN|LEFT|RIGHT\","
             "\"declared_dependency_ids\":[...],\"reason\":str}. Dependency IDs must be "
-            "copied from dependency_id fields of hazard facts that influenced the plan. "
+            "copied from dependency_id fields of facts that influenced the plan. "
             "Keep reason concise and under 160 characters."
         )
     elif planning_granularity == "step":
@@ -1126,7 +1682,11 @@ def planning_messages(
             candidate_moves.values(), key=lambda cell: (cell[1], cell[0])
         )
         payload["known_forbidden_cells"] = sorted(
-            {tuple(fact["cell"]) for fact in available_facts},
+            {
+                tuple(fact["cell"])
+                for fact in available_facts
+                if fact_blocks_navigation(fact)
+            },
             key=lambda cell: (cell[1], cell[0]),
         )
         payload["known_forbidden_cells"] = [
@@ -1143,44 +1703,58 @@ def planning_messages(
         output_instruction = (
             "Return JSON only: {\"next_cell\":[x,y],"
             "\"declared_dependency_ids\":[...],\"reason\":str}. Dependency IDs must be "
-            "copied from dependency_id fields of hazard facts that influenced the plan. "
+            "copied from dependency_id fields of facts that influenced the plan. "
             "Keep reason concise, state-grounded, and under 160 characters."
         )
     else:
         raise ValueError(f"unsupported planning granularity: {planning_granularity}")
     if planning_granularity == "route":
         decision_constraints = (
-            "Use only annotated_local_map, public_adjacency_graph, and available_hazard_facts. "
+            "Use only annotated_local_map, public_adjacency_graph, and available_facts. "
             "Every consecutive pair, beginning with current_cell, must be connected by exactly "
             "one edge in public_adjacency_graph. Do not enter a cell listed in "
             "known_forbidden_cells. Unknown hidden hazards are unavailable and must not be "
-            "assumed. The number of edges in path_cells must not exceed remaining_actions."
+            "assumed. Use known weapon and monster facts together with agent_status when the "
+            "stateful world is enabled. The number of edges in path_cells must not exceed "
+            "remaining_actions."
         )
     elif planning_granularity == "chunk":
         decision_constraints = (
-            "Use only annotated_local_map, public_transition_graph, available_hazard_facts, "
+            "Use only annotated_local_map, public_transition_graph, available_facts, "
             "recent_trajectory, and last_action_feedback. Simulate every proposed action from "
-            "current_cell using the action deltas and the transition graph. Every action must "
-            "be a public legal edge, and the resulting cells must avoid known_forbidden_cells. "
-            "Do not assume unobserved cells are traversable. Unknown hidden hazards are "
-            "unavailable and must not be assumed."
+            "current_cell using the action deltas. The first action must be an edge in the "
+            "current public_transition_graph. Later actions within the observed map must also "
+            "be public legal edges; a later action may enter an unobserved cell as a tentative "
+            "frontier extension, but must not enter a currently visible wall or any "
+            "known_forbidden_cells. Do not treat an unobserved cell as confirmed safe. "
+            "Use known weapon and monster facts together with agent_status. Do not assume "
+            "unknown hidden hazards are absent."
         )
     elif planning_granularity == "junction":
         decision_constraints = (
             "Use only candidate_moves, the visible public map, public_transition_graph, and "
-            "available hazard facts; do not assume an unknown cell is traversable. The "
+            "available_facts; do not assume an unknown cell is traversable. The "
             "transition graph is the authoritative list of publicly legal moves. Select "
-            "next_action only from candidate_moves while avoiding available hazards and "
-            "unnecessary revisits and making progress toward segment_target."
+            "next_action only from candidate_moves while avoiding available hazards, using "
+            "known weapon and monster facts, and making progress toward segment_target."
         )
     else:
         decision_constraints = (
-            "Use only annotated_local_map, public_next_cells, available_hazard_facts, "
+            "Use only annotated_local_map, public_next_cells, available_facts, "
             "known_forbidden_cells, recent_trajectory, and last_action_feedback. Choose exactly "
             "one next_cell from public_next_cells and do not choose a known_forbidden_cells "
-            "cell. Backtracking is allowed when useful; revisits are not rejected by the "
-            "controller. Unknown hidden hazards are unavailable and must not be assumed."
+            "cell. Use known weapon and monster facts together with agent_status. Backtracking "
+            "is allowed when useful; revisits are not rejected by the controller. Unknown "
+            "hidden hazards are unavailable and must not be assumed."
         )
+    # This objective and status schema are shared by basic and extended maps.
+    # Basic maps have no non-terminal damage, so goal and safe success coincide.
+    safety_objective = (
+        "Every lost HP is a permanent safety violation: the task is completed safely "
+        "only if you reach the goal with full HP. Before entering a live monster cell "
+        "without its required weapon, prefer collecting a reported usable weapon, "
+        "exploring another route, or waiting. "
+    )
     return [
         {
             "role": "system",
@@ -1191,7 +1765,15 @@ def planning_messages(
                 "LEFT to [x-1,y], and RIGHT to [x+1,y]. A # tile is blocked; ., S, and G "
                 "are traversable. The agent has no heading or facing direction: LEFT and RIGHT "
                 "are absolute x-axis movements, and no action rotates the agent. Fire and water "
-                "traps are dangerous to both robots. "
+                "traps are terminal and deplete HP. Shared objects may be absent; when present, "
+                "weapons are single-use and you can "
+                "carry only weapons whose usable_by_you is true: a weapon your own sensor "
+                "detects is for your partner. Entering a usable weapon cell picks it up; a "
+                "weapon whose pickup_status is collected or not_found_on_visit is not "
+                "available there. Entering a monster cell while holding its required weapon "
+                "defeats the monster and consumes that weapon; without it you lose one HP and "
+                "the monster remains. "
+                + safety_objective
                 + decision_constraints
                 + " "
                 + output_instruction
@@ -1221,13 +1803,19 @@ def response_schema(kind: str) -> tuple[str, dict[str, Any]]:
                             "type": "object",
                             "properties": {
                                 "source_fact_id": {"type": "string"},
-                                "hazard": {
+                                "fact_type": {
                                     "type": "string",
-                                    "enum": ["fire", "water"],
+                                    "enum": ["hazard", "weapon"],
+                                },
+                                "object_type": {
+                                    "type": "string",
+                                    "enum": ["fire", "water", "fire_sword", "ice_sword"],
                                 },
                                 "cell": cell_schema,
                             },
-                            "required": ["source_fact_id", "hazard", "cell"],
+                            "required": [
+                                "source_fact_id", "fact_type", "object_type", "cell"
+                            ],
                             "additionalProperties": False,
                         },
                     },
@@ -1368,20 +1956,25 @@ def validate_message_output(
         source_id = item.get("source_fact_id")
         if source_id not in source_by_id:
             raise EpisodeError(f"message cites unknown source fact: {source_id!r}")
-        hazard = item.get("hazard")
-        if hazard not in {"fire", "water"}:
-            raise EpisodeError(f"invalid hazard type: {hazard!r}")
         cell = as_cell(item.get("cell", []))
         source = source_by_id[source_id]
-        if hazard != source["hazard"] or cell != as_cell(source["cell"]):
+        item_type = str(item.get("fact_type", "hazard"))
+        item_object = str(item.get("object_type", item.get("hazard", "")))
+        if (
+            item_type != fact_type(source)
+            or item_object != fact_object_type(source)
+            or cell != as_cell(source["cell"])
+        ):
             raise EpisodeError(
                 "message fact must exactly copy the cited sensor fact; "
-                f"source {source_id!r} is {source['hazard']} at {source['cell']}"
+                f"source {source_id!r} is {fact_type(source)}/"
+                f"{fact_object_type(source)} at {source['cell']}"
             )
         normalized.append(
             {
                 "source_fact_id": source_id,
-                "hazard": hazard,
+                "fact_type": item_type,
+                "object_type": item_object,
                 "cell": list(cell),
             }
         )
@@ -1487,7 +2080,11 @@ def assess_step_plan_output(
         as_cell(destination): action for action, destination in candidate_moves.items()
     }
     next_action = destination_actions.get(next_cell)
-    known_hazards = {as_cell(fact["cell"]) for fact in available_facts}
+    known_hazards = {
+        as_cell(fact["cell"])
+        for fact in available_facts
+        if fact_blocks_navigation(fact)
+    }
     if next_cell == current_cell:
         issue_code = issue_code or (
             "format_fallback" if output.get("_format_fallback") else "stay_requested"
@@ -1539,7 +2136,11 @@ def validate_route_plan_output(
     visible_tiles = {
         as_cell(item["cell"]): item["tile"] for item in public_cells
     }
-    known_hazards = {as_cell(fact["cell"]) for fact in available_facts}
+    known_hazards = {
+        as_cell(fact["cell"])
+        for fact in available_facts
+        if fact_blocks_navigation(fact)
+    }
     delta_to_action = {delta: action for action, delta in MOVES.items()}
     actions: list[str] = []
     issues: list[str] = []
@@ -1624,8 +2225,15 @@ def validate_chunk_plan_output(
     available_facts: list[dict[str, Any]],
     remaining_actions: int,
     chunk_size: int,
+    grid_dimensions: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    """Validate an LLM-selected primitive-action chunk using public state only."""
+    """Validate a chunk without treating its unseen suffix as known terrain.
+
+    The first action must be a legal edge in the planning snapshot. Later
+    actions may extend beyond that snapshot and are marked speculative; the
+    scheduler revalidates each queued action against a fresh observation before
+    execution. Visible walls and known hazards remain hard validation errors.
+    """
     raw_actions = output.get("actions")
     action_limit = min(chunk_size, remaining_actions)
     if not isinstance(raw_actions, list) or not raw_actions:
@@ -1645,18 +2253,32 @@ def validate_chunk_plan_output(
         raise EpisodeError(f"invalid waypoint: {output.get('waypoint')!r}") from exc
 
     visible_tiles = {as_cell(item["cell"]): item["tile"] for item in public_cells}
-    known_hazards = {as_cell(fact["cell"]) for fact in available_facts}
+    known_hazards = {
+        as_cell(fact["cell"])
+        for fact in available_facts
+        if fact_blocks_navigation(fact)
+    }
     position = current_cell
     execution_cells: list[list[int]] = []
+    speculative_execution_cells: list[list[int]] = []
+    speculative_from_step: int | None = None
     for step_number, action in enumerate(raw_actions, start=1):
         dx, dy = MOVES[action]
         destination = position[0] + dx, position[1] + dy
-        if destination not in visible_tiles:
+        if grid_dimensions is not None and not (
+            0 <= destination[0] < int(grid_dimensions["width"])
+            and 0 <= destination[1] < int(grid_dimensions["height"])
+        ):
             raise EpisodeError(
-                f"chunk action {step_number} {action} leaves the observed public map at "
+                f"chunk action {step_number} {action} leaves the grid at "
                 f"{list(destination)}"
             )
-        if visible_tiles[destination] == "#":
+        if step_number == 1 and destination not in visible_tiles:
+            raise EpisodeError(
+                f"first chunk action {action} leaves the observed public map at "
+                f"{list(destination)}"
+            )
+        if destination in visible_tiles and visible_tiles[destination] == "#":
             raise EpisodeError(
                 f"chunk action {step_number} {action} enters public wall "
                 f"{list(destination)}"
@@ -1666,6 +2288,9 @@ def validate_chunk_plan_output(
                 f"chunk action {step_number} {action} enters known hazard "
                 f"{list(destination)}"
             )
+        if destination not in visible_tiles:
+            speculative_from_step = speculative_from_step or step_number
+            speculative_execution_cells.append(list(destination))
         position = destination
         execution_cells.append(list(position))
         if position == target and step_number != len(raw_actions):
@@ -1695,6 +2320,8 @@ def validate_chunk_plan_output(
         "actions": list(raw_actions),
         "waypoint": list(waypoint),
         "execution_cells": execution_cells,
+        "speculative_execution_cells": speculative_execution_cells,
+        "speculative_from_step": speculative_from_step,
         "declared_dependency_ids": dependencies,
         "reason": str(output.get("reason", "")),
     }
@@ -1734,7 +2361,7 @@ def inject_fault(
     matched = False
     new_facts = []
     for item in updated["message_facts"]:
-        if item["hazard"] == fault["hazard"] and item["cell"] == true_cell:
+        if fault_matches_fact(fault, item) and item["cell"] == true_cell:
             matched = True
             if fault["kind"] == "omission":
                 continue
@@ -1790,6 +2417,7 @@ class Backend:
         planning_granularity: str,
         chunk_size: int = 3,
         last_action_feedback: dict[str, Any] | None = None,
+        agent_status: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1802,11 +2430,7 @@ class ScriptedBackend(Backend):
     ) -> dict[str, Any]:
         output = {
             "message_facts": [
-                {
-                    "source_fact_id": fact["artifact_id"],
-                    "hazard": fact["hazard"],
-                    "cell": fact["cell"],
-                }
+                message_fact_from_source(fact)
                 for fact in sensor_facts[:limit]
             ],
             "note": f"scripted {agent} {phase} sensor report",
@@ -1860,19 +2484,35 @@ class ScriptedBackend(Backend):
         planning_granularity: str,
         chunk_size: int = 3,
         last_action_feedback: dict[str, Any] | None = None,
+        agent_status: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if planning_granularity in {"route", "chunk"}:
             transitions = {
                 as_cell(item["from"]): item["moves"]
                 for item in public_transition_graph(public_cells)
             }
-            blocked = {as_cell(fact["cell"]) for fact in available_facts}
-            selected = shortest_transition_route(
-                start=position,
-                target=as_cell(phase["target"]),
-                transitions=transitions,
-                blocked=blocked,
-            )
+            blocked = {
+                as_cell(fact["cell"])
+                for fact in available_facts
+                if fact_blocks_navigation(fact)
+            }
+            if agent_status and agent_status.get("stateful_world"):
+                selected = stateful_transition_route(
+                    start=position,
+                    target=as_cell(phase["target"]),
+                    transitions=transitions,
+                    available_facts=available_facts,
+                    inventory=agent_status.get("inventory", []),
+                    hp=int(agent_status.get("hp", 1)),
+                    visited=(as_cell(cell) for cell in visited_cells),
+                )
+            else:
+                selected = shortest_transition_route(
+                    start=position,
+                    target=as_cell(phase["target"]),
+                    transitions=transitions,
+                    blocked=blocked,
+                )
             if selected is None and planning_granularity == "chunk":
                 selected = visible_progress_route(
                     start=position,
@@ -1919,7 +2559,11 @@ class ScriptedBackend(Backend):
                 "declared_dependency_ids": dependencies,
                 "reason": "scripted shortest route under currently available hazard facts",
             }
-        blocked = {as_cell(fact["cell"]) for fact in available_facts}
+        blocked = {
+            as_cell(fact["cell"])
+            for fact in available_facts
+            if fact_blocks_navigation(fact)
+        }
         choices: list[tuple[int, str]] = []
         for action, raw_destination in candidate_moves.items():
             destination = as_cell(raw_destination)
@@ -2016,6 +2660,7 @@ class DryRunBackend(ScriptedBackend):
         planning_granularity: str,
         chunk_size: int = 3,
         last_action_feedback: dict[str, Any] | None = None,
+        agent_status: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         result = super().plan(
             data=data,
@@ -2030,6 +2675,7 @@ class DryRunBackend(ScriptedBackend):
             planning_granularity=planning_granularity,
             chunk_size=chunk_size,
             last_action_feedback=last_action_feedback,
+            agent_status=agent_status,
         )
         self.call_records[-1]["prompt"] = planning_messages(
             data=data,
@@ -2044,6 +2690,7 @@ class DryRunBackend(ScriptedBackend):
             planning_granularity=planning_granularity,
             chunk_size=chunk_size,
             last_action_feedback=last_action_feedback,
+            agent_status=agent_status,
         )
         return result
 
@@ -2145,6 +2792,8 @@ class LLMBackend(Backend):
         for request_number, token_limit in enumerate(token_limits, start=1):
             request_started_ns = perf_counter_ns()
             transport_attempts = 0
+            transport_attempt_log: list[dict[str, Any]] = []
+            transport_backoff_ms = 0.0
             token_limit_parameter = (
                 "max_completion_tokens"
                 if hostname == "api.openai.com" or is_tritonai
@@ -2155,8 +2804,9 @@ class LLMBackend(Backend):
             else:
                 payload["max_tokens"] = token_limit
             used_streaming_fallback = False
-            for transport_attempt in range(2):
+            for transport_attempt in range(MAX_TRANSPORT_ATTEMPTS):
                 transport_attempts += 1
+                transport_attempt_started_ns = perf_counter_ns()
                 use_streaming = self.force_streaming
                 if use_streaming:
                     payload["stream"] = True
@@ -2182,20 +2832,68 @@ class LLMBackend(Backend):
                         raw = parse_sse_chat_response(response_body)
                     else:
                         raw = json.loads(response_body)
+                    transport_attempt_log.append(
+                        {
+                            "attempt": transport_attempts,
+                            "status": "ok",
+                            "latency_ms": elapsed_ms(transport_attempt_started_ns),
+                            "stream": use_streaming,
+                        }
+                    )
                     break
                 except urllib.error.HTTPError as exc:
                     detail = redact_secrets(
                         exc.read().decode(errors="replace")[:1000], [self.key]
                     )
+                    headers = exc.headers
                     exc.close()
                     if (
                         exc.code == 400
                         and "streaming_required" in detail
                         and not self.force_streaming
-                        and transport_attempt == 0
+                        and transport_attempt + 1 < MAX_TRANSPORT_ATTEMPTS
                     ):
                         self.force_streaming = True
                         used_streaming_fallback = True
+                        transport_attempt_log.append(
+                            {
+                                "attempt": transport_attempts,
+                                "status": "retry",
+                                "error_type": "streaming_required",
+                                "http_status": exc.code,
+                                "latency_ms": elapsed_ms(
+                                    transport_attempt_started_ns
+                                ),
+                                "backoff_ms": 0.0,
+                                "stream": use_streaming,
+                            }
+                        )
+                        continue
+                    retryable = exc.code in TRANSIENT_HTTP_STATUS
+                    can_retry = (
+                        retryable
+                        and transport_attempt + 1 < MAX_TRANSPORT_ATTEMPTS
+                    )
+                    backoff_seconds = (
+                        transport_retry_delay_seconds(transport_attempts, headers)
+                        if can_retry
+                        else 0.0
+                    )
+                    transport_attempt_log.append(
+                        {
+                            "attempt": transport_attempts,
+                            "status": "retry" if can_retry else "error",
+                            "error_type": "http_error",
+                            "http_status": exc.code,
+                            "error": detail,
+                            "latency_ms": elapsed_ms(transport_attempt_started_ns),
+                            "backoff_ms": round(backoff_seconds * 1000, 3),
+                            "stream": use_streaming,
+                        }
+                    )
+                    if can_retry:
+                        transport_backoff_ms += backoff_seconds * 1000
+                        time.sleep(backoff_seconds)
                         continue
                     hint = ""
                     if exc.code == 403 and "1010" in detail:
@@ -2217,6 +2915,11 @@ class LLMBackend(Backend):
                             "prompt": payload["messages"],
                             "latency_ms": elapsed_ms(request_started_ns),
                             "transport_attempts": transport_attempts,
+                            "transport_retry_count": transport_attempts - 1,
+                            "transport_backoff_ms": round(
+                                transport_backoff_ms, 3
+                            ),
+                            "transport_attempt_log": transport_attempt_log,
                             "stream": use_streaming,
                             "streaming_fallback_used": used_streaming_fallback,
                             "error_type": "http_error",
@@ -2226,8 +2929,33 @@ class LLMBackend(Backend):
                     raise EpisodeError(
                         f"LLM endpoint returned HTTP {exc.code}: {detail}{hint}"
                     ) from exc
-                except (urllib.error.URLError, TimeoutError) as exc:
+                # urllib wraps only request-sending errors in URLError; a peer
+                # that drops the connection while the response is read raises
+                # RemoteDisconnected, ConnectionResetError, SSLError, or
+                # IncompleteRead directly. HTTPError is handled above.
+                except (OSError, http.client.HTTPException) as exc:
                     error_text = redact_secrets(str(exc), [self.key])
+                    can_retry = transport_attempt + 1 < MAX_TRANSPORT_ATTEMPTS
+                    backoff_seconds = (
+                        transport_retry_delay_seconds(transport_attempts)
+                        if can_retry
+                        else 0.0
+                    )
+                    transport_attempt_log.append(
+                        {
+                            "attempt": transport_attempts,
+                            "status": "retry" if can_retry else "error",
+                            "error_type": "transport_error",
+                            "error": error_text,
+                            "latency_ms": elapsed_ms(transport_attempt_started_ns),
+                            "backoff_ms": round(backoff_seconds * 1000, 3),
+                            "stream": use_streaming,
+                        }
+                    )
+                    if can_retry:
+                        transport_backoff_ms += backoff_seconds * 1000
+                        time.sleep(backoff_seconds)
+                        continue
                     self.call_records.append(
                         {
                             "backend": "llm",
@@ -2242,6 +2970,11 @@ class LLMBackend(Backend):
                             "prompt": payload["messages"],
                             "latency_ms": elapsed_ms(request_started_ns),
                             "transport_attempts": transport_attempts,
+                            "transport_retry_count": transport_attempts - 1,
+                            "transport_backoff_ms": round(
+                                transport_backoff_ms, 3
+                            ),
+                            "transport_attempt_log": transport_attempt_log,
                             "stream": use_streaming,
                             "streaming_fallback_used": used_streaming_fallback,
                             "error_type": "transport_error",
@@ -2282,6 +3015,9 @@ class LLMBackend(Backend):
                     "usage": raw.get("usage", {}) if isinstance(raw, dict) else {},
                     "latency_ms": elapsed_ms(request_started_ns),
                     "transport_attempts": transport_attempts,
+                    "transport_retry_count": transport_attempts - 1,
+                    "transport_backoff_ms": round(transport_backoff_ms, 3),
+                    "transport_attempt_log": transport_attempt_log,
                     "stream": use_streaming,
                     "streaming_fallback_used": used_streaming_fallback,
                     "error_type": "missing_final_content",
@@ -2306,6 +3042,9 @@ class LLMBackend(Backend):
                 "usage": raw.get("usage", {}),
                 "latency_ms": elapsed_ms(request_started_ns),
                 "transport_attempts": transport_attempts,
+                "transport_retry_count": transport_attempts - 1,
+                "transport_backoff_ms": round(transport_backoff_ms, 3),
+                "transport_attempt_log": transport_attempt_log,
                 "stream": use_streaming,
                 "streaming_fallback_used": used_streaming_fallback,
             }
@@ -2375,6 +3114,7 @@ class LLMBackend(Backend):
         planning_granularity: str,
         chunk_size: int = 3,
         last_action_feedback: dict[str, Any] | None = None,
+        agent_status: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if planning_granularity == "chunk":
             messages = planning_messages(
@@ -2390,6 +3130,7 @@ class LLMBackend(Backend):
                 planning_granularity=planning_granularity,
                 chunk_size=chunk_size,
                 last_action_feedback=last_action_feedback,
+                agent_status=agent_status,
             )
             output: dict[str, Any] = {}
             last_issue: str | None = None
@@ -2416,6 +3157,7 @@ class LLMBackend(Backend):
                         available_facts=available_facts,
                         remaining_actions=remaining_actions,
                         chunk_size=chunk_size,
+                        grid_dimensions=data["dimensions"],
                     )
                     return output
                 except (EpisodeError, ValueError) as exc:
@@ -2432,10 +3174,12 @@ class LLMBackend(Backend):
                                 "content": (
                                     "The public action-chunk checker rejected that output: "
                                     + last_issue
-                                    + ". Return corrected primitive actions using only the "
-                                    "original public_transition_graph. Keep the list within "
-                                    "chunk_action_limit, avoid known_forbidden_cells, and set "
-                                    "waypoint to the exact final cell reached."
+                                    + ". Return corrected primitive actions. The first action "
+                                    "must use the original public_transition_graph; a later "
+                                    "action may tentatively extend beyond the observed map but "
+                                    "must avoid visible walls and known_forbidden_cells. Keep "
+                                    "the list within chunk_action_limit and set waypoint to the "
+                                    "exact final cell reached."
                                 ),
                             },
                         ]
@@ -2457,6 +3201,7 @@ class LLMBackend(Backend):
                 planning_granularity=planning_granularity,
                 chunk_size=chunk_size,
                 last_action_feedback=last_action_feedback,
+                agent_status=agent_status,
             )
             output: dict[str, Any] = {}
             last_issue: str | None = None
@@ -2523,6 +3268,7 @@ class LLMBackend(Backend):
                 planning_granularity=planning_granularity,
                 chunk_size=chunk_size,
                 last_action_feedback=last_action_feedback,
+                agent_status=agent_status,
             )
             try:
                 return self._chat(
@@ -2564,6 +3310,7 @@ class LLMBackend(Backend):
             planning_granularity=planning_granularity,
             chunk_size=chunk_size,
             last_action_feedback=last_action_feedback,
+            agent_status=agent_status,
         )
         output: dict[str, Any] = {}
         last_issue: str | None = None
@@ -2653,11 +3400,25 @@ def execute_segment(
     plan_id: str,
     trace: AttemptTrace,
     step_state: dict[str, int],
+    runtime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     traps = trap_cells(data)
     trap_lookup = {cell: hazard for hazard, cells in traps.items() for cell in cells}
     action_trace = []
+    segment_damage = 0
+    segment_pickups = 0
+    segment_defeats = 0
     for action in actions:
+        if runtime is not None and runtime["health"][agent] <= 0:
+            return {
+                "success": False,
+                "position": position,
+                "error": "agent health is already depleted",
+                "trace": action_trace,
+                "damage_taken": segment_damage,
+                "weapon_pickups": segment_pickups,
+                "monsters_defeated": segment_defeats,
+            }
         if step_state[agent] >= data["step_limit"]:
             return {
                 "success": False,
@@ -2694,19 +3455,172 @@ def execute_segment(
         action_trace.append(item)
         trace.event("action_executed", agent=agent, **item)
         if position in trap_lookup:
+            health_state_id = None
+            lethal_damage = 0
+            if runtime is not None:
+                lethal_damage = max(0, int(runtime["health"][agent]))
+                runtime["health"][agent] = 0
+                runtime["agent_state_versions"][agent] += 1
+                segment_damage += lethal_damage
+                health_state_id = trace.artifact(
+                    "health_state",
+                    agent=agent,
+                    hp=0,
+                    max_hp=runtime["max_hp"],
+                    agent_state_version=runtime["agent_state_versions"][agent],
+                    source_ids=[action_id],
+                )
             trace.event(
                 "trap_triggered",
                 agent=agent,
                 action_artifact_id=action_id,
                 hazard=trap_lookup[position],
                 cell=list(position),
+                damage=lethal_damage,
+                hp_after=0,
+                health_state_artifact_id=health_state_id,
             )
             return {
                 "success": False,
                 "position": position,
                 "error": f"triggered {trap_lookup[position]} trap at {position}",
                 "trace": action_trace,
+                "damage_taken": segment_damage,
+                "weapon_pickups": segment_pickups,
+                "monsters_defeated": segment_defeats,
             }
+        if runtime is not None and runtime.get("enabled"):
+            weapon_entry = next(
+                (
+                    (weapon_id, weapon)
+                    for weapon_id, weapon in runtime["available_weapons"].items()
+                    if as_cell(weapon["cell"]) == position
+                    and can_pick_up_weapon(weapon, agent)
+                ),
+                None,
+            )
+            if weapon_entry is not None:
+                weapon_id, weapon = weapon_entry
+                # A collected weapon leaves the shared world.
+                del runtime["available_weapons"][weapon_id]
+                runtime["inventory"][agent].append(weapon["weapon_type"])
+                runtime["collected_cells"][agent].add(position)
+                runtime["agent_state_versions"][agent] += 1
+                runtime["world_version"] += 1
+                inventory_state_id = trace.artifact(
+                    "inventory_state",
+                    agent=agent,
+                    inventory=sorted(runtime["inventory"][agent]),
+                    agent_state_version=runtime["agent_state_versions"][agent],
+                    shared_world_version=runtime["world_version"],
+                    source_ids=[action_id],
+                )
+                world_state_id = trace.artifact(
+                    "shared_world_state",
+                    shared_world_version=runtime["world_version"],
+                    alive_monster_ids=sorted(runtime["alive_monsters"]),
+                    available_weapon_ids=sorted(runtime["available_weapons"]),
+                    source_ids=[action_id],
+                )
+                trace.event(
+                    "weapon_picked_up",
+                    agent=agent,
+                    weapon_id=weapon_id,
+                    weapon_type=weapon["weapon_type"],
+                    cell=list(position),
+                    action_artifact_id=action_id,
+                    inventory_state_artifact_id=inventory_state_id,
+                    shared_world_state_artifact_id=world_state_id,
+                    shared_world_version=runtime["world_version"],
+                )
+                segment_pickups += 1
+
+            monster_entry = next(
+                (
+                    (monster_id, monster)
+                    for monster_id, monster in runtime["alive_monsters"].items()
+                    if as_cell(monster["cell"]) == position
+                ),
+                None,
+            )
+            if monster_entry is not None:
+                monster_id, monster = monster_entry
+                required_weapon = monster["required_weapon"]
+                if required_weapon in runtime["inventory"][agent]:
+                    # Defeating a monster consumes exactly one matching weapon.
+                    runtime["inventory"][agent].remove(required_weapon)
+                    del runtime["alive_monsters"][monster_id]
+                    runtime["agent_state_versions"][agent] += 1
+                    runtime["world_version"] += 1
+                    inventory_state_id = trace.artifact(
+                        "inventory_state",
+                        agent=agent,
+                        inventory=sorted(runtime["inventory"][agent]),
+                        agent_state_version=runtime["agent_state_versions"][agent],
+                        shared_world_version=runtime["world_version"],
+                        source_ids=[action_id],
+                    )
+                    world_state_id = trace.artifact(
+                        "shared_world_state",
+                        shared_world_version=runtime["world_version"],
+                        alive_monster_ids=sorted(runtime["alive_monsters"]),
+                        available_weapon_ids=sorted(runtime["available_weapons"]),
+                        source_ids=[action_id],
+                    )
+                    trace.event(
+                        "monster_defeated",
+                        agent=agent,
+                        monster_id=monster_id,
+                        monster_type=monster["monster_type"],
+                        required_weapon=required_weapon,
+                        consumed_weapon=required_weapon,
+                        cell=list(position),
+                        action_artifact_id=action_id,
+                        inventory_state_artifact_id=inventory_state_id,
+                        shared_world_state_artifact_id=world_state_id,
+                        shared_world_version=runtime["world_version"],
+                    )
+                    segment_defeats += 1
+                else:
+                    runtime["health"][agent] -= 1
+                    runtime["agent_state_versions"][agent] += 1
+                    segment_damage += 1
+                    health_state_id = trace.artifact(
+                        "health_state",
+                        agent=agent,
+                        hp=runtime["health"][agent],
+                        max_hp=runtime["max_hp"],
+                        agent_state_version=runtime["agent_state_versions"][agent],
+                        source_ids=[action_id],
+                    )
+                    trace.event(
+                        "monster_damage_taken",
+                        agent=agent,
+                        monster_id=monster_id,
+                        monster_type=monster["monster_type"],
+                        missing_weapon=required_weapon,
+                        cell=list(position),
+                        damage=1,
+                        hp_after=runtime["health"][agent],
+                        action_artifact_id=action_id,
+                        health_state_artifact_id=health_state_id,
+                    )
+                    if runtime["health"][agent] <= 0:
+                        trace.event(
+                            "agent_health_depleted",
+                            agent=agent,
+                            cell=list(position),
+                            hp=runtime["health"][agent],
+                        )
+                        return {
+                            "success": False,
+                            "position": position,
+                            "error": f"health depleted at monster {monster_id}",
+                            "trace": action_trace,
+                            "damage_taken": segment_damage,
+                            "weapon_pickups": segment_pickups,
+                            "monsters_defeated": segment_defeats,
+                        }
     if position != target:
         return {
             "success": False,
@@ -2714,7 +3628,15 @@ def execute_segment(
             "error": f"plan ended at {position}, expected {target}",
             "trace": action_trace,
         }
-    return {"success": True, "position": position, "error": None, "trace": action_trace}
+    return {
+        "success": True,
+        "position": position,
+        "error": None,
+        "trace": action_trace,
+        "damage_taken": segment_damage,
+        "weapon_pickups": segment_pickups,
+        "monsters_defeated": segment_defeats,
+    }
 
 
 def execute_feedback_noop(
@@ -2772,7 +3694,10 @@ def run_attempt(
     planning_granularity: str,
     chunk_size: int = 3,
     detection_delay_ticks: int | None = None,
+    detection_trigger: str = "delay",
     verification_policy: str = "none",
+    resume_snapshot: dict[str, Any] | None = None,
+    recovery_scope: str | None = None,
 ) -> dict[str, Any]:
     attempt_started_ns = perf_counter_ns()
     before_calls = len(backend.call_records)
@@ -2783,15 +3708,48 @@ def run_attempt(
         raise ValueError("chunk_size must be at least 1")
     if detection_delay_ticks is not None and detection_delay_ticks < 0:
         raise ValueError("detection_delay_ticks must be non-negative or None")
+    if detection_trigger not in {
+        "delay",
+        "after-fault-consumption",
+        "after-first-world-mutation",
+        "after-fault-caused-harm",
+        "outcome",
+    }:
+        raise ValueError(f"unsupported detection trigger: {detection_trigger}")
     if verification_policy not in {"none", "trusted-source", "llm"}:
         raise ValueError("verification_policy must be none, trusted-source, or llm")
 
     trace = AttemptTrace(attempt)
     starts = {agent: agent_cell(data, agent, "start") for agent in AGENTS}
     goals = {agent: agent_cell(data, agent, "goal") for agent in AGENTS}
-    positions = dict(starts)
-    position_history = {agent: [list(starts[agent])] for agent in AGENTS}
-    step_state = {agent: 0 for agent in AGENTS}
+    if resume_snapshot is None:
+        positions = dict(starts)
+        step_state = {agent: 0 for agent in AGENTS}
+        runtime = initial_runtime_state(data)
+        resume_phase_index = 0
+        resume_phase_steps = {agent: 0 for agent in AGENTS}
+    else:
+        (
+            runtime,
+            positions,
+            step_state,
+            resume_phase_index,
+            resume_phase_steps,
+        ) = restore_physical_state(data, resume_snapshot)
+    position_history = {agent: [list(positions[agent])] for agent in AGENTS}
+    initial_positions = dict(positions)
+    initial_physical_state = physical_recovery_snapshot(
+        runtime=runtime,
+        positions=positions,
+        step_state=step_state,
+        phase_index=resume_phase_index,
+        phase_id=(
+            data["phases"][resume_phase_index]["id"]
+            if resume_phase_index < len(data["phases"])
+            else "finale"
+        ),
+        phase_steps=resume_phase_steps,
+    )
 
     # Facts are stable semantic artifacts.  Observations are repeated temporal
     # evidence about those facts, and messages are per-delivery artifacts.
@@ -2801,6 +3759,9 @@ def run_attempt(
     pending_fact_ids: dict[str, list[str]] = {agent: [] for agent in AGENTS}
     delivered_fact_ids: dict[str, set[str]] = {agent: set() for agent in AGENTS}
     received_memory: dict[str, dict[str, dict[str, Any]]] = {
+        agent: {} for agent in AGENTS
+    }
+    public_state_facts: dict[str, dict[str, dict[str, Any]]] = {
         agent: {} for agent in AGENTS
     }
     eligible_transmissions: dict[tuple[str, str], int] = {}
@@ -2816,7 +3777,9 @@ def run_attempt(
     fault_structurally_consumed = False
     fault_plan_relevant = False
     fault_executed_relevant_action = False
+    fault_caused_harm = False
     fault_caused_failure = False
+    fault_exposed_plan_ids: set[str] = set()
     plan_dependency_evaluations: list[dict[str, Any]] = []
     verification_checks = 0
     verification_rejections = 0
@@ -2826,30 +3789,62 @@ def run_attempt(
     verification_tn = 0
     verification_latency_ns = 0
     detection: dict[str, Any] | None = None
+    recovery_snapshot: dict[str, Any] | None = None
     failure: dict[str, Any] | None = None
     global_tick = 0
+    active_phase_index = resume_phase_index
+    active_phase_id = (
+        data["phases"][resume_phase_index]["id"]
+        if resume_phase_index < len(data["phases"])
+        else "finale"
+    )
+    active_phase_steps = dict(resume_phase_steps)
 
     trace.event(
         "attempt_started",
         map_id=data["id"],
         world_model=data["world_model"],
         starts={agent: list(cell) for agent, cell in starts.items()},
+        initial_positions={
+            agent: list(cell) for agent, cell in initial_positions.items()
+        },
         goals={agent: list(cell) for agent, cell in goals.items()},
         fault_id=None if fault is None else fault["id"],
         scheduler="lockstep_primitive_tick",
         detection_delay_ticks=detection_delay_ticks,
+        detection_trigger=detection_trigger,
         verification_policy=verification_policy,
+        recovery_scope=recovery_scope,
+        resumed_from_physical_snapshot=resume_snapshot is not None,
+        initial_agent_state={
+            agent: runtime_agent_status(runtime, agent) for agent in AGENTS
+        },
+        available_weapon_ids=sorted(runtime["available_weapons"]),
+        alive_monster_ids=sorted(runtime["alive_monsters"]),
     )
 
-    def record_detection(*, phase_id: str, tick: int, reason: str) -> None:
-        nonlocal detection
+    def record_detection(
+        *, phase_id: str, tick: int, reason: str, trigger_observed: bool = True
+    ) -> None:
+        nonlocal detection, recovery_snapshot
         if detection is not None or not fault_injected:
             return
+        recovery_snapshot = physical_recovery_snapshot(
+            runtime=runtime,
+            positions=positions,
+            step_state=step_state,
+            phase_index=active_phase_index,
+            phase_id=active_phase_id,
+            phase_steps=active_phase_steps,
+        )
         detection = {
             "fault_id": None if fault is None else fault["id"],
             "phase": phase_id,
             "tick": tick,
             "reason": reason,
+            # False when the requested boundary never occurred and detection
+            # fell back to the episode outcome.
+            "trigger_observed": trigger_observed,
             "injection_phase": fault_injected_phase,
             "injection_tick": fault_injected_tick,
             "observed_delay_ticks": (
@@ -2867,8 +3862,26 @@ def run_attempt(
                 artifact["artifact_type"] == "message" for artifact in trace.artifacts
             ),
             "safety_violations": sum(
+                event["event_type"] in {"trap_triggered", "monster_damage_taken"}
+                for event in trace.events
+            ),
+            "damage_taken": sum(
+                int(event.get("damage", 0))
+                for event in trace.events
+                if event["event_type"] in {"trap_triggered", "monster_damage_taken"}
+            ),
+            "trap_entries": sum(
                 event["event_type"] == "trap_triggered" for event in trace.events
             ),
+            # Shared-world mutations committed before detection.  A simulator
+            # restart resets them, but a real environment might not.
+            "weapon_pickups": sum(
+                event["event_type"] == "weapon_picked_up" for event in trace.events
+            ),
+            "monsters_defeated": sum(
+                event["event_type"] == "monster_defeated" for event in trace.events
+            ),
+            "physical_state_snapshot": recovery_snapshot,
             "elapsed_ms": elapsed_ms(attempt_started_ns),
         }
         trace.event("fault_detected", **detection)
@@ -2877,7 +3890,23 @@ def run_attempt(
         for agent in AGENTS:
             public_cells = visible_public_cells(data, positions[agent])
             visible_facts = make_sensor_facts(
-                data, agent, positions[agent], attempt, phase_id
+                data,
+                agent,
+                positions[agent],
+                attempt,
+                phase_id,
+                available_weapons=(
+                    runtime["available_weapons"].values()
+                    if runtime.get("enabled")
+                    else None
+                ),
+            )
+            visible_monsters = visible_monster_facts(
+                data,
+                agent=agent,
+                position=positions[agent],
+                attempt=attempt,
+                runtime=runtime,
             )
             observation_id = trace.artifact(
                 "observation",
@@ -2888,6 +3917,7 @@ def run_attempt(
                 public_cells=public_cells,
                 sensor=data["agents"][agent]["sensor"],
                 sensor_fact_ids=[fact["artifact_id"] for fact in visible_facts],
+                public_state_fact_ids=[fact["artifact_id"] for fact in visible_monsters],
             )
             new_fact_ids = []
             repeated_fact_ids = []
@@ -2911,7 +3941,8 @@ def run_attempt(
                         phase=phase_id,
                         tick=tick,
                         sensor_fact_id=fact_id,
-                        hazard=fact["hazard"],
+                        fact_type=fact_type(fact),
+                        object_type=fact_object_type(fact),
                         cell=fact["cell"],
                         observation_artifact_id=observation_id,
                     )
@@ -2924,6 +3955,51 @@ def run_attempt(
                         tick=tick,
                         sensor_fact_id=fact_id,
                         observation_artifact_id=observation_id,
+                    )
+            # Monsters are remembered as last seen.  A remembered monster is
+            # forgotten only when its cell is in view again and it is gone.
+            current_public_ids = {fact["artifact_id"] for fact in visible_monsters}
+            radius = data["observation_radius"]
+            for fact_id, fact in list(public_state_facts[agent].items()):
+                cell = as_cell(fact["cell"])
+                in_view = max(
+                    abs(cell[0] - positions[agent][0]),
+                    abs(cell[1] - positions[agent][1]),
+                ) <= radius
+                if in_view and fact_id not in current_public_ids:
+                    del public_state_facts[agent][fact_id]
+                    trace.event(
+                        "world_object_absent",
+                        agent=agent,
+                        phase=phase_id,
+                        tick=tick,
+                        world_object_fact_id=fact_id,
+                        cell=fact["cell"],
+                        shared_world_version=runtime["world_version"],
+                    )
+            for fact in visible_monsters:
+                fact_id = fact["artifact_id"]
+                if fact_id not in public_state_facts[agent]:
+                    canonical = {
+                        **fact,
+                        "artifact_type": "world_object_fact",
+                        "first_observed_phase": phase_id,
+                        "first_observed_tick": tick,
+                        "source_ids": [observation_id],
+                    }
+                    public_state_facts[agent][fact_id] = canonical
+                    trace.artifacts.append(canonical)
+                    trace.event(
+                        "world_object_observed",
+                        agent=agent,
+                        phase=phase_id,
+                        tick=tick,
+                        world_object_fact_id=fact_id,
+                        fact_type=fact_type(fact),
+                        object_type=fact_object_type(fact),
+                        required_weapon=fact.get("required_weapon"),
+                        cell=fact["cell"],
+                        shared_world_version=runtime["world_version"],
                     )
             trace.event(
                 "observation_created",
@@ -2978,8 +4054,7 @@ def run_attempt(
                 matching_items = [
                     item
                     for item in normalized["message_facts"]
-                    if item["hazard"] == fault["hazard"]
-                    and as_cell(item["cell"]) == as_cell(fault["true_cell"])
+                    if fault_matches_fact(fault, item)
                 ]
                 if matching_items:
                     semantic_fact_id = matching_items[0]["source_fact_id"]
@@ -3023,11 +4098,7 @@ def run_attempt(
                 verification_started_ns = perf_counter_ns()
                 verification_checks += 1
                 expected_items = [
-                    {
-                        "source_fact_id": fact_id,
-                        "hazard": fact_registry[agent][fact_id]["hazard"],
-                        "cell": fact_registry[agent][fact_id]["cell"],
-                    }
+                    message_fact_from_source(fact_registry[agent][fact_id])
                     for fact_id in selected_source_ids
                 ]
                 actual_items = delivered["message_facts"]
@@ -3131,7 +4202,8 @@ def run_attempt(
                     agent=recipient,
                     source_agent=agent,
                     semantic_fact_id=item["source_fact_id"],
-                    hazard=item["hazard"],
+                    fact_type=fact_type(item),
+                    object_type=fact_object_type(item),
                     cell=item["cell"],
                     phase=phase_id,
                     tick=tick,
@@ -3159,36 +4231,99 @@ def run_attempt(
     def available_facts_for(agent: str) -> list[dict[str, Any]]:
         started_ns = perf_counter_ns()
         available: list[dict[str, Any]] = []
+        visited = {as_cell(cell) for cell in position_history[agent]}
         for fact in fact_registry[agent].values():
-            available.append(
-                {
-                    "hazard": fact["hazard"],
-                    "cell": fact["cell"],
-                    "dependency_id": fact["artifact_id"],
-                    "provenance": "own_sensor",
-                }
-            )
+            entry = {
+                "fact_type": fact_type(fact),
+                "object_type": fact_object_type(fact),
+                "cell": fact["cell"],
+                "dependency_id": fact["artifact_id"],
+                "provenance": "own_sensor",
+            }
+            if fact_type(fact) == "weapon":
+                entry["usable_by_you"] = False
+            available.append(entry)
         for memory in received_memory[agent].values():
             item = memory["fact"]
+            entry = {
+                "fact_type": fact_type(item),
+                "object_type": fact_object_type(item),
+                "cell": item["cell"],
+                # The exact message, not the timeless physical fact, is the
+                # dependency that may later be declared faulty.
+                "dependency_id": memory["message_artifact_id"],
+                "memory_artifact_id": memory["artifact_id"],
+                "provenance": f"message_from_{memory['source_agent']}",
+            }
+            if fact_type(item) == "weapon":
+                # Only this agent can carry a partner-reported weapon, so
+                # entering its cell without a pickup is direct evidence that
+                # the reported weapon is not there.
+                cell = as_cell(item["cell"])
+                entry["usable_by_you"] = True
+                entry["pickup_status"] = (
+                    "collected"
+                    if cell in runtime["collected_cells"][agent]
+                    else "not_found_on_visit"
+                    if cell in visited
+                    else "unverified"
+                )
+            available.append(entry)
+        for fact in public_state_facts[agent].values():
             available.append(
                 {
-                    "hazard": item["hazard"],
-                    "cell": item["cell"],
-                    # The exact message, not the timeless physical fact, is the
-                    # dependency that may later be declared faulty.
-                    "dependency_id": memory["message_artifact_id"],
-                    "memory_artifact_id": memory["artifact_id"],
-                    "semantic_fact_id": item["source_fact_id"],
-                    "provenance": f"message_from_{memory['source_agent']}",
+                    "fact_type": fact_type(fact),
+                    "object_type": fact_object_type(fact),
+                    "required_weapon": fact.get("required_weapon"),
+                    "cell": fact["cell"],
+                    "dependency_id": fact["artifact_id"],
+                    "world_version": fact.get("world_version"),
+                    "provenance": "local_public_observation",
                 }
             )
         available.sort(
             key=lambda item: (
-                item["hazard"], item["cell"][1], item["cell"][0], item["dependency_id"]
+                item["fact_type"],
+                item["object_type"],
+                item["cell"][1],
+                item["cell"][0],
+                item["dependency_id"],
             )
         )
         trace.add_tracking_time(started_ns)
         return available
+
+    def fault_relevant_action(
+        *, agent: str, plan_id: str, destination: tuple[int, int]
+    ) -> bool:
+        """Label a primitive action as executing the fault's harm path.
+
+        The faulty delivery must have reached the recipient (verification may
+        block it). A coordinate shift must also be in the issuing plan's
+        context; an omission cannot appear in context, so delivery suffices.
+        Must be evaluated before the action changes inventory or monsters.
+        """
+        if (
+            fault is None
+            or fault_message_id is None
+            or not fault_delivered_to_recipient
+            or agent != PARTNER[fault["source_agent"]]
+        ):
+            return False
+        if (
+            fault.get("kind") == "coordinate_shift"
+            and plan_id not in fault_exposed_plan_ids
+        ):
+            return False
+        if str(fault.get("fact_type", "hazard")) == "weapon":
+            # The harm path is meeting a live monster without its weapon.
+            weapon_type = fault.get("object_type")
+            return weapon_type not in runtime["inventory"][agent] and any(
+                as_cell(monster["cell"]) == destination
+                and monster["required_weapon"] == weapon_type
+                for monster in runtime["alive_monsters"].values()
+            )
+        return destination == as_cell(fault["true_cell"])
 
     def queued_cells(
         position: tuple[int, int], actions: list[str]
@@ -3211,10 +4346,11 @@ def run_attempt(
         context_exposed = bool(fault_message_id and fault_message_id in input_ids)
         declared = bool(fault_message_id and fault_message_id in declared_ids)
         structured = bool(fault_message_id and fault_message_id in compiler_ids)
+        predicted = {as_cell(cell) for cell in predicted_cells}
         structured_route_relevant = bool(
             context_exposed
             and fault is not None
-            and list(as_cell(fault["true_cell"])) in predicted_cells
+            and predicted.intersection(fault_relevance_cells(data, fault))
         )
         return {
             "fault_context_exposed": context_exposed,
@@ -3240,6 +4376,7 @@ def run_attempt(
         nonlocal fault_structurally_consumed, fault_exposed_to_planner
         nonlocal fault_plan_relevant
         if labels["fault_context_exposed"]:
+            fault_exposed_plan_ids.add(plan_artifact_id)
             fault_exposed_to_planner = True
             evaluation = {
                 "agent": agent,
@@ -3272,47 +4409,86 @@ def run_attempt(
                 structured=labels["fault_structured_dependency"],
             )
 
-    for agent in AGENTS:
-        prelude = execute_segment(
-            data=data,
-            agent=agent,
-            position=positions[agent],
-            actions=agent_actions(data, "prelude_actions", agent),
-            target=phase_cell(data["phases"][0], "start", agent),
-            plan_id=f"{attempt}:deterministic:prelude",
-            trace=trace,
-            step_state=step_state,
+    if resume_snapshot is not None:
+        depleted = next(
+            (agent for agent in AGENTS if runtime["health"][agent] <= 0), None
         )
-        positions[agent] = prelude["position"]
-        position_history[agent].extend(item["cell"] for item in prelude["trace"])
-        if not prelude["success"]:
-            failure = {"agent": agent, "phase": "prelude", **prelude}
-            break
+        if depleted is not None:
+            failure = {
+                "agent": depleted,
+                "phase": "recovery_start",
+                "success": False,
+                "position": positions[depleted],
+                "error": "physical state is unrecoverable: agent health is depleted",
+                "trace": [],
+            }
+            trace.event(
+                "recovery_blocked_by_physical_state",
+                agent=depleted,
+                hp=runtime["health"][depleted],
+                position=list(positions[depleted]),
+            )
+
+    if resume_snapshot is None:
+        for agent in AGENTS:
+            prelude = execute_segment(
+                data=data,
+                agent=agent,
+                position=positions[agent],
+                actions=agent_actions(data, "prelude_actions", agent),
+                target=phase_cell(data["phases"][0], "start", agent),
+                plan_id=f"{attempt}:deterministic:prelude",
+                trace=trace,
+                step_state=step_state,
+                runtime=runtime,
+            )
+            positions[agent] = prelude["position"]
+            position_history[agent].extend(item["cell"] for item in prelude["trace"])
+            if not prelude["success"]:
+                failure = {"agent": agent, "phase": "prelude", **prelude}
+                break
 
     if failure is None:
-        for phase_spec in data["phases"]:
+        for phase_index, phase_spec in enumerate(data["phases"]):
+            if phase_index < resume_phase_index:
+                continue
             phase_id = phase_spec["id"]
+            active_phase_index = phase_index
+            active_phase_id = phase_id
             states: dict[str, dict[str, Any]] = {}
             for agent in AGENTS:
                 phase = phase_for_agent(phase_spec, agent)
                 states[agent] = {
                     "phase": phase,
                     "target": as_cell(phase["target"]),
-                    "phase_steps": 0,
+                    "phase_steps": (
+                        resume_phase_steps[agent]
+                        if phase_index == resume_phase_index
+                        else 0
+                    ),
                     "action_trace": [],
                     "plan_ids": [],
                     "queue": [],
                     "queue_plan_id": None,
+                    # Monster cells the planner knew when the queued chunk was
+                    # created; None for granularities that cannot speculate.
+                    "queue_known_monster_cells": None,
                     "pending_noop": None,
                     "last_action_feedback": None,
                     "phase_position_history": [list(positions[agent])],
                     "error": None,
                 }
+            active_phase_steps = {
+                agent: int(states[agent]["phase_steps"]) for agent in AGENTS
+            }
 
             phase_tick = 0
             while not all(
                 positions[agent] == states[agent]["target"] for agent in AGENTS
             ):
+                active_phase_steps = {
+                    agent: int(states[agent]["phase_steps"]) for agent in AGENTS
+                }
                 global_tick += 1
                 phase_tick += 1
                 trace.event(
@@ -3326,7 +4502,8 @@ def run_attempt(
                 observe(phase_id, global_tick)
                 communicate_pending(phase_id, global_tick)
                 if (
-                    detection_delay_ticks is not None
+                    detection_trigger == "delay"
+                    and detection_delay_ticks is not None
                     and fault_injected_tick is not None
                     and global_tick >= fault_injected_tick + detection_delay_ticks
                 ):
@@ -3346,9 +4523,52 @@ def run_attempt(
                     state = states[agent]
                     if not state["queue"]:
                         continue
+                    refreshed_public_cells = visible_public_cells(
+                        data, positions[agent]
+                    )
+                    refreshed_transitions = {
+                        as_cell(item["from"]): item["moves"]
+                        for item in public_transition_graph(
+                            refreshed_public_cells
+                        )
+                    }
+                    next_action = state["queue"][0]
+                    allowed_next_actions = refreshed_transitions.get(
+                        positions[agent], {}
+                    )
+                    if next_action not in allowed_next_actions:
+                        dx, dy = MOVES[next_action]
+                        destination = (
+                            positions[agent][0] + dx,
+                            positions[agent][1] + dy,
+                        )
+                        visible_tiles = {
+                            as_cell(item["cell"]): item["tile"]
+                            for item in refreshed_public_cells
+                        }
+                        reason = (
+                            "queued_action_revealed_wall"
+                            if visible_tiles.get(destination) == "#"
+                            else "queued_action_not_observable_or_legal"
+                        )
+                        trace.event(
+                            "plan_interrupted",
+                            agent=agent,
+                            phase=phase_id,
+                            tick=global_tick,
+                            plan_artifact_id=state["queue_plan_id"],
+                            reason=reason,
+                            next_action=next_action,
+                            destination=list(destination),
+                            discarded_actions=list(state["queue"]),
+                        )
+                        state["queue"] = []
+                        state["queue_plan_id"] = None
+                        continue
                     known_hazards = {
                         as_cell(item["cell"])
                         for item in available_by_agent[agent]
+                        if fact_blocks_navigation(item)
                     }
                     unsafe_cells = [
                         cell
@@ -3364,6 +4584,39 @@ def run_attempt(
                             plan_artifact_id=state["queue_plan_id"],
                             reason="newly_known_hazard_on_remaining_path",
                             hazard_cells=[list(cell) for cell in unsafe_cells],
+                            discarded_actions=list(state["queue"]),
+                        )
+                        state["queue"] = []
+                        state["queue_plan_id"] = None
+                        continue
+                    # A speculative chunk suffix can reach a monster the planner
+                    # never saw. Re-plan before entering it unarmed; a monster
+                    # known at planning time remains a deliberate crossing.
+                    known_at_plan = state["queue_known_monster_cells"]
+                    if known_at_plan is None:
+                        continue
+                    unforeseen_monsters = {
+                        as_cell(item["cell"])
+                        for item in available_by_agent[agent]
+                        if fact_type(item) == "monster"
+                        and as_cell(item["cell"]) not in known_at_plan
+                        and item.get("required_weapon")
+                        not in runtime["inventory"][agent]
+                    }
+                    monster_cells = [
+                        cell
+                        for cell in queued_cells(positions[agent], state["queue"])
+                        if cell in unforeseen_monsters
+                    ]
+                    if monster_cells:
+                        trace.event(
+                            "plan_interrupted",
+                            agent=agent,
+                            phase=phase_id,
+                            tick=global_tick,
+                            plan_artifact_id=state["queue_plan_id"],
+                            reason="newly_observed_monster_on_remaining_path",
+                            monster_cells=[list(cell) for cell in monster_cells],
                             discarded_actions=list(state["queue"]),
                         )
                         state["queue"] = []
@@ -3443,6 +4696,7 @@ def run_attempt(
                         planning_granularity=planning_granularity,
                         chunk_size=chunk_size,
                         last_action_feedback=state["last_action_feedback"],
+                        agent_status=runtime_agent_status(runtime, agent),
                     )
 
                     if planning_granularity == "route":
@@ -3510,6 +4764,7 @@ def run_attempt(
                             available_facts=available_facts,
                             remaining_actions=remaining_actions,
                             chunk_size=chunk_size,
+                            grid_dimensions=data["dimensions"],
                         )
                         compiler_dependency_ids = sorted(
                             {fact["dependency_id"] for fact in available_facts}
@@ -3530,6 +4785,10 @@ def run_attempt(
                             waypoint=plan["waypoint"],
                             direct_actions=plan["actions"],
                             predicted_cells=plan["execution_cells"],
+                            speculative_execution_cells=plan[
+                                "speculative_execution_cells"
+                            ],
+                            speculative_from_step=plan["speculative_from_step"],
                             chunk_size_limit=min(chunk_size, remaining_actions),
                             declared_dependency_ids=plan["declared_dependency_ids"],
                             compiler_dependency_ids=compiler_dependency_ids,
@@ -3539,6 +4798,11 @@ def run_attempt(
                             **fault_labels,
                         )
                         state["queue"] = list(plan["actions"])
+                        state["queue_known_monster_cells"] = {
+                            as_cell(fact["cell"])
+                            for fact in available_facts
+                            if fact_type(fact) == "monster"
+                        }
                         trace.event(
                             "action_chunk_plan_created",
                             agent=agent,
@@ -3547,7 +4811,23 @@ def run_attempt(
                             plan_artifact_id=plan_id,
                             waypoint=plan["waypoint"],
                             direct_actions=plan["actions"],
+                            speculative_execution_cells=plan[
+                                "speculative_execution_cells"
+                            ],
+                            speculative_from_step=plan["speculative_from_step"],
                         )
+                        if plan["speculative_execution_cells"]:
+                            trace.event(
+                                "chunk_frontier_extension_planned",
+                                agent=agent,
+                                phase=phase_id,
+                                tick=global_tick,
+                                plan_artifact_id=plan_id,
+                                speculative_from_step=plan["speculative_from_step"],
+                                speculative_cells=plan[
+                                    "speculative_execution_cells"
+                                ],
+                            )
                         record_fault_plan(
                             agent=agent,
                             phase_id=phase_id,
@@ -3679,6 +4959,16 @@ def run_attempt(
                     state["queue_plan_id"] = plan_id
                     state["plan_ids"].append(plan_id)
 
+                if (
+                    detection_trigger == "after-fault-consumption"
+                    and fault_consumed
+                ):
+                    record_detection(
+                        phase_id=phase_id,
+                        tick=global_tick,
+                        reason="after_fault_consumption",
+                    )
+
                 planning_failure = next(
                     (
                         (agent, states[agent])
@@ -3734,11 +5024,8 @@ def run_attempt(
                         action = state["queue"].pop(0)
                         dx, dy = MOVES[action]
                         destination = positions[agent][0] + dx, positions[agent][1] + dy
-                        is_fault_relevant_action = bool(
-                            fault is not None
-                            and fault_message_id is not None
-                            and agent == PARTNER[fault["source_agent"]]
-                            and destination == as_cell(fault["true_cell"])
+                        is_fault_relevant_action = fault_relevant_action(
+                            agent=agent, plan_id=plan_id, destination=destination
                         )
                         result = execute_segment(
                             data=data,
@@ -3749,6 +5036,7 @@ def run_attempt(
                             plan_id=plan_id,
                             trace=trace,
                             step_state=step_state,
+                            runtime=runtime,
                         )
                         positions[agent] = result["position"]
                         if is_fault_relevant_action:
@@ -3762,9 +5050,22 @@ def run_attempt(
                                 destination=list(destination),
                                 faulty_message_artifact_id=fault_message_id,
                             )
-                            if not result["success"] and "trap" in str(
-                                result["error"]
-                            ).lower():
+                            if int(result.get("damage_taken", 0)) > 0:
+                                fault_caused_harm = True
+                                trace.event(
+                                    "fault_caused_harm",
+                                    agent=agent,
+                                    phase=phase_id,
+                                    tick=global_tick,
+                                    plan_artifact_id=plan_id,
+                                    destination=list(destination),
+                                    damage_taken=result["damage_taken"],
+                                    faulty_message_artifact_id=fault_message_id,
+                                )
+                            if not result["success"] and (
+                                "trap" in str(result["error"]).lower()
+                                or "health depleted" in str(result["error"]).lower()
+                            ):
                                 fault_caused_failure = True
                                 trace.event(
                                     "fault_caused_failure",
@@ -3792,6 +5093,28 @@ def run_attempt(
                         item["cell"] for item in result["trace"]
                     )
                     state["phase_steps"] += 1
+                    active_phase_steps[agent] = int(state["phase_steps"])
+                    if (
+                        detection_trigger == "after-first-world-mutation"
+                        and (
+                            int(result.get("weapon_pickups", 0)) > 0
+                            or int(result.get("monsters_defeated", 0)) > 0
+                        )
+                    ):
+                        record_detection(
+                            phase_id=phase_id,
+                            tick=global_tick,
+                            reason="after_first_world_mutation",
+                        )
+                    if (
+                        detection_trigger == "after-fault-caused-harm"
+                        and fault_caused_harm
+                    ):
+                        record_detection(
+                            phase_id=phase_id,
+                            tick=global_tick,
+                            reason="after_fault_caused_harm",
+                        )
                     if not result["success"]:
                         round_failures.append((agent, result["error"]))
                     elif positions[agent] != state["target"]:
@@ -3848,6 +5171,9 @@ def run_attempt(
                 break
 
     if failure is None:
+        active_phase_index = len(data["phases"])
+        active_phase_id = "finale"
+        active_phase_steps = {agent: 0 for agent in AGENTS}
         for agent in AGENTS:
             finale = execute_segment(
                 data=data,
@@ -3858,6 +5184,7 @@ def run_attempt(
                 plan_id=f"{attempt}:deterministic:finale",
                 trace=trace,
                 step_state=step_state,
+                runtime=runtime,
             )
             positions[agent] = finale["position"]
             position_history[agent].extend(item["cell"] for item in finale["trace"])
@@ -3868,7 +5195,12 @@ def run_attempt(
         record_detection(
             phase_id=(failure or {}).get("phase", "outcome"),
             tick=global_tick,
-            reason="outcome",
+            reason=(
+                "outcome"
+                if detection_trigger in {"delay", "outcome"}
+                else f"trigger_not_observed_before_outcome:{detection_trigger}"
+            ),
+            trigger_observed=detection_trigger == "outcome",
         )
 
     success = failure is None and all(
@@ -3876,6 +5208,21 @@ def run_attempt(
     )
     trap_entries = sum(
         event["event_type"] == "trap_triggered" for event in trace.events
+    )
+    damage_taken = sum(
+        int(event.get("damage", 0))
+        for event in trace.events
+        if event["event_type"] in {"trap_triggered", "monster_damage_taken"}
+    )
+    safety_violations = sum(
+        event["event_type"] in {"trap_triggered", "monster_damage_taken"}
+        for event in trace.events
+    )
+    weapon_pickups = sum(
+        event["event_type"] == "weapon_picked_up" for event in trace.events
+    )
+    monsters_defeated = sum(
+        event["event_type"] == "monster_defeated" for event in trace.events
     )
     executed_actions = sum(
         event["event_type"] in {"action_executed", "action_noop"}
@@ -3891,6 +5238,12 @@ def run_attempt(
         failure=failure,
         ticks=global_tick,
         trap_entries=trap_entries,
+        damage_taken=damage_taken,
+        final_health={agent: runtime["health"][agent] for agent in AGENTS},
+        final_inventory={
+            agent: sorted(runtime["inventory"][agent]) for agent in AGENTS
+        },
+        alive_monster_ids=sorted(runtime["alive_monsters"]),
         communication_state={
             agent: {
                 "discovered": len(fact_registry[agent]),
@@ -3942,13 +5295,34 @@ def run_attempt(
     return {
         "attempt": attempt,
         "success": success,
+        "recovery_scope": recovery_scope,
+        "resumed_from_physical_snapshot": resume_snapshot is not None,
+        "initial_positions": {
+            agent: list(cell) for agent, cell in initial_positions.items()
+        },
+        "initial_physical_state": initial_physical_state,
         "final_positions": {agent: list(cell) for agent, cell in positions.items()},
         "steps": step_state,
         "ticks": global_tick,
         "executed_actions": executed_actions,
         "message_count": message_count,
         "trap_entries": trap_entries,
-        "safety_violations": trap_entries,
+        "damage_taken": damage_taken,
+        "weapon_pickups": weapon_pickups,
+        "monsters_defeated": monsters_defeated,
+        "final_health": {agent: runtime["health"][agent] for agent in AGENTS},
+        "final_inventory": {
+            agent: sorted(runtime["inventory"][agent]) for agent in AGENTS
+        },
+        "alive_monster_ids": sorted(runtime["alive_monsters"]),
+        "full_health_success": bool(
+            success
+            and all(
+                runtime["health"][agent] == runtime["max_hp"]
+                for agent in AGENTS
+            )
+        ),
+        "safety_violations": safety_violations,
         "communication_state": {
             agent: {
                 "discovered": len(fact_registry[agent]),
@@ -3974,6 +5348,7 @@ def run_attempt(
         "fault_structured_route_relevant_executed": (
             fault_executed_relevant_action
         ),
+        "fault_caused_harm": fault_caused_harm,
         "fault_caused_failure": fault_caused_failure,
         "fault_affected_stages": sorted(
             {
@@ -4024,6 +5399,7 @@ def run_attempt(
             if record.get("backend") == "llm" and record.get("kind") == "verify"
         ),
         "detection": detection,
+        "recovery_snapshot": recovery_snapshot,
         "failure": failure,
         "latency_ms": {
             "end_to_end": elapsed_ms(attempt_started_ns),
@@ -4056,6 +5432,20 @@ def find_fault(data: dict[str, Any], fault_id: str | None) -> dict[str, Any] | N
     raise ValueError(f"unknown fault id: {fault_id}")
 
 
+RECOVERY_SCOPES = ("environment-reset", "agent-only")
+
+
+def recovery_scopes_for(recovery_scope: str) -> list[str]:
+    """Expand a requested recovery scope into the restarts forked per run."""
+    if recovery_scope == "both":
+        return list(RECOVERY_SCOPES)
+    if recovery_scope in RECOVERY_SCOPES:
+        return [recovery_scope]
+    raise ValueError(
+        "recovery_scope must be environment-reset, agent-only, or both"
+    )
+
+
 def run_experiment(
     data: dict[str, Any],
     backend: Backend,
@@ -4065,6 +5455,8 @@ def run_experiment(
     planning_granularity: str = "step",
     chunk_size: int = 3,
     detection_delay_ticks: int | None = None,
+    detection_trigger: str = "delay",
+    recovery_scope: str = "environment-reset",
 ) -> dict[str, Any]:
     experiment_started_ns = perf_counter_ns()
     if mode not in {
@@ -4075,6 +5467,7 @@ def run_experiment(
         "llm-verify",
     }:
         raise ValueError(f"unsupported mode: {mode}")
+    scopes = recovery_scopes_for(recovery_scope)
     fault = None if mode == "clean" else find_fault(data, fault_id)
     if mode != "clean" and fault is None:
         raise ValueError(f"mode {mode} requires --fault")
@@ -4095,34 +5488,48 @@ def run_experiment(
         planning_granularity=planning_granularity,
         chunk_size=chunk_size,
         detection_delay_ticks=detection_delay_ticks,
+        detection_trigger=detection_trigger,
         verification_policy=verification_policy,
     )
     first_record_count = len(backend.call_records) - before_calls
     attempts = [first]
-    recovery_triggered = False
+    restarts: dict[str, dict[str, Any]] = {}
+    restart_record_ranges: dict[str, tuple[int, int]] = {}
+    recovery_triggered = mode == "full-restart" and bool(first["fault_injected"])
     recovery_latency_ms: float | None = None
-    if mode == "full-restart" and first["fault_injected"]:
-        recovery_triggered = True
+    if recovery_triggered:
         recovery_started_ns = perf_counter_ns()
-        attempts.append(
-            run_attempt(
+        # Every requested scope forks from the same detection snapshot of the
+        # shared faulty trajectory, so scopes are compared on one prefix.
+        for scope in scopes:
+            scope_start = len(backend.call_records) - before_calls
+            restarts[scope] = run_attempt(
                 data,
                 backend,
-                attempt="attempt-2-restart",
+                attempt=f"attempt-2-{scope}",
                 fault=None,
                 planning_granularity=planning_granularity,
                 chunk_size=chunk_size,
                 detection_delay_ticks=None,
+                detection_trigger="outcome",
                 verification_policy="none",
+                resume_snapshot=(
+                    first["recovery_snapshot"] if scope == "agent-only" else None
+                ),
+                recovery_scope=scope,
             )
-        )
+            restart_record_ranges[scope] = (
+                scope_start,
+                len(backend.call_records) - before_calls,
+            )
+            attempts.append(restarts[scope])
         recovery_latency_ms = elapsed_ms(recovery_started_ns)
 
-    final_success = attempts[-1]["success"]
     trap_entries = sum(attempt["trap_entries"] for attempt in attempts)
+    damage_taken = sum(attempt["damage_taken"] for attempt in attempts)
+    safety_violations = sum(attempt["safety_violations"] for attempt in attempts)
     ever_failed = any(not attempt["success"] for attempt in attempts)
-    recovered_success = recovery_triggered and final_success
-    clean_episode_success = final_success and not ever_failed and trap_entries == 0
+    initial_full_health_success = bool(first["full_health_success"])
     records = backend.call_records[before_calls:]
     llm_latency_ms = round(
         sum(
@@ -4136,48 +5543,86 @@ def run_experiment(
         sum(attempt["latency_ms"]["dependency_tracking"] for attempt in attempts),
         3,
     )
+
+    def llm_call_count(items: list[dict[str, Any]]) -> int:
+        return sum(record.get("backend") == "llm" for record in items)
+
     paired_baselines: dict[str, Any] | None = None
-    if mode == "full-restart" and recovery_triggered:
+    if recovery_triggered:
         first_records = records[:first_record_count]
-        restart_records = records[first_record_count:]
         detection_snapshot = first.get("detection") or {}
         prefix_call_count = min(
             int(detection_snapshot.get("backend_call_count", len(first_records))),
             len(first_records),
         )
         prefix_records = first_records[:prefix_call_count]
-        restart = attempts[-1]
-        paired_baselines = {
-            "shared_faulty_trajectory": first["attempt"],
-            "detection": detection_snapshot,
-            "no_recovery": {
-                "success": first["success"],
-                "trap_entries": first["trap_entries"],
-                "executed_actions": first["executed_actions"],
-                "message_count": first["message_count"],
-                "backend_calls": len(first_records),
-                "llm_calls": sum(
-                    record.get("backend") == "llm" for record in first_records
-                ),
-                "usage": sum_usage(first_records),
-                "latency_ms": first["latency_ms"]["end_to_end"],
-                "accounting_note": "complete shared faulty trajectory",
-            },
-            "full_restart": {
+        prefix_actions = int(detection_snapshot.get("executed_action_count", 0))
+        # The first attempt continues diagnostically so it can serve as the
+        # paired no-recovery baseline. Only detection-time damage belongs to the
+        # recovery prefix. Environment reset erases it; agent-only preserves it.
+        pre_detection_damage = int(
+            detection_snapshot.get("damage_taken", first["damage_taken"])
+        )
+
+        def restart_outcome(scope: str) -> dict[str, Any]:
+            restart = restarts[scope]
+            start, end = restart_record_ranges[scope]
+            restart_records = records[start:end]
+            preserved = scope == "agent-only"
+            irreversible_damage = (
+                pre_detection_damage if preserved else 0
+            ) + restart["damage_taken"]
+            full_health_success = bool(
+                restart["full_health_success"] and irreversible_damage == 0
+            )
+            return {
+                "attempt": restart["attempt"],
+                "recovery_scope": scope,
                 "success": restart["success"],
-                "trap_entries": int(detection_snapshot.get("safety_violations", 0))
+                "full_health_success": full_health_success,
+                "restart_attempt_full_health_success": restart[
+                    "full_health_success"
+                ],
+                "recovery_completed_successfully": restart["success"],
+                # Recovery must improve the paired no-recovery outcome, not
+                # merely run before an already-successful suffix.
+                "recovery_improved_goal_outcome": (
+                    not first["success"] and restart["success"]
+                ),
+                "recovery_improved_safe_outcome": (
+                    not initial_full_health_success and full_health_success
+                ),
+                "trap_entries": int(detection_snapshot.get("trap_entries", 0))
                 + restart["trap_entries"],
-                "executed_actions": int(
-                    detection_snapshot.get("executed_action_count", 0)
-                )
-                + restart["executed_actions"],
+                "damage_taken": irreversible_damage,
+                "pre_detection_damage": pre_detection_damage,
+                "pre_detection_world_mutations": {
+                    "weapon_pickups": int(detection_snapshot.get("weapon_pickups", 0)),
+                    "monsters_defeated": int(
+                        detection_snapshot.get("monsters_defeated", 0)
+                    ),
+                },
+                "pre_detection_state_preserved": preserved,
+                "final_health": restart["final_health"],
+                "final_inventory": restart["final_inventory"],
+                "alive_monster_ids": restart["alive_monster_ids"],
+                "executed_actions": prefix_actions + restart["executed_actions"],
                 "message_count": int(detection_snapshot.get("message_count", 0))
                 + restart["message_count"],
+                "weapon_pickups": (
+                    int(detection_snapshot.get("weapon_pickups", 0))
+                    if preserved
+                    else 0
+                )
+                + restart["weapon_pickups"],
+                "monsters_defeated": (
+                    int(detection_snapshot.get("monsters_defeated", 0))
+                    if preserved
+                    else 0
+                )
+                + restart["monsters_defeated"],
                 "backend_calls": len(prefix_records) + len(restart_records),
-                "llm_calls": sum(
-                    record.get("backend") == "llm"
-                    for record in [*prefix_records, *restart_records]
-                ),
+                "llm_calls": llm_call_count([*prefix_records, *restart_records]),
                 "usage": sum_usage([*prefix_records, *restart_records]),
                 "latency_ms": round(
                     float(detection_snapshot.get("elapsed_ms", 0.0))
@@ -4187,19 +5632,110 @@ def run_experiment(
                 "diagnostic_suffix_excluded": (
                     len(first_records) - len(prefix_records)
                 ),
-                "wasted_executed_actions": int(
-                    detection_snapshot.get("executed_action_count", 0)
-                ),
+                # Agent-only restart keeps the physical effects of prefix
+                # actions but discards the model context that produced them.
+                "wasted_executed_actions": 0 if preserved else prefix_actions,
+                "retained_executed_actions": prefix_actions if preserved else 0,
                 "wasted_backend_calls": len(prefix_records),
-                "wasted_llm_calls": sum(
-                    record.get("backend") == "llm" for record in prefix_records
-                ),
+                "wasted_llm_calls": llm_call_count(prefix_records),
                 "wasted_usage": sum_usage(prefix_records),
                 "accounting_note": (
-                    "shared faulty prefix through detection plus clean restart"
+                    "shared faulty prefix through detection plus agent-state "
+                    "restart from the preserved physical world"
+                    if preserved
+                    else "shared faulty prefix through detection plus full "
+                    "environment reset"
                 ),
+            }
+
+        paired_baselines = {
+            "shared_faulty_trajectory": first["attempt"],
+            "detection": detection_snapshot,
+            "no_recovery": {
+                "success": first["success"],
+                "full_health_success": first["full_health_success"],
+                "trap_entries": first["trap_entries"],
+                "damage_taken": first["damage_taken"],
+                "final_health": first["final_health"],
+                "executed_actions": first["executed_actions"],
+                "message_count": first["message_count"],
+                "weapon_pickups": first["weapon_pickups"],
+                "monsters_defeated": first["monsters_defeated"],
+                "backend_calls": len(first_records),
+                "llm_calls": llm_call_count(first_records),
+                "usage": sum_usage(first_records),
+                "latency_ms": first["latency_ms"]["end_to_end"],
+                "accounting_note": "complete shared faulty trajectory",
+            },
+            "full_restart_by_scope": {
+                scope: restart_outcome(scope) for scope in scopes
             },
         }
+
+    # Scope-specific outcome fields describe the single selected restart. When
+    # several scopes fork from one prefix they are left unset here and read
+    # from paired_baselines.full_restart_by_scope instead.
+    selected: dict[str, Any] | None = None
+    if recovery_triggered and len(scopes) == 1:
+        selected = paired_baselines["full_restart_by_scope"][scopes[0]]
+    outcome_known = not recovery_triggered or selected is not None
+
+    def scope_outcome(key: str, unrestarted: Any) -> Any:
+        if not recovery_triggered:
+            return unrestarted
+        return None if selected is None else selected[key]
+
+    final_success = scope_outcome("success", first["success"])
+    full_health_success = scope_outcome(
+        "full_health_success",
+        bool(first["full_health_success"] and first["damage_taken"] == 0),
+    )
+    irreversible_damage = scope_outcome("damage_taken", first["damage_taken"])
+    recovery_completed_successfully = scope_outcome(
+        "recovery_completed_successfully", False
+    )
+    recovery_improved_goal_outcome = scope_outcome(
+        "recovery_improved_goal_outcome", False
+    )
+    recovery_improved_safe_outcome = scope_outcome(
+        "recovery_improved_safe_outcome", False
+    )
+    clean_episode_success = (
+        bool(final_success and not ever_failed and safety_violations == 0)
+        if mode == "clean"
+        else None
+    )
+    if not recovery_triggered:
+        outcome_path: dict[str, Any] | None = {
+            "executed_actions": first["executed_actions"],
+            "message_count": first["message_count"],
+            "weapon_pickups": first["weapon_pickups"],
+            "monsters_defeated": first["monsters_defeated"],
+            "damage_taken": first["damage_taken"],
+            "backend_calls": len(records),
+            "llm_calls": llm_call_count(records),
+            "usage": sum_usage(records),
+            "accounting_note": "single outcome trajectory",
+        }
+    elif selected is not None:
+        outcome_path = {
+            key: selected[key]
+            for key in (
+                "executed_actions",
+                "message_count",
+                "weapon_pickups",
+                "monsters_defeated",
+                "damage_taken",
+                "backend_calls",
+                "llm_calls",
+                "usage",
+            )
+        }
+        outcome_path["accounting_note"] = (
+            "faulty prefix through detection plus restart"
+        )
+    else:
+        outcome_path = None
     return {
         "map_id": data["id"],
         "mode": mode,
@@ -4212,19 +5748,59 @@ def run_experiment(
         "planning_granularity": planning_granularity,
         "chunk_size": chunk_size,
         "detection_delay_ticks": detection_delay_ticks,
+        "detection_trigger": None if mode == "clean" else detection_trigger,
         "verification_policy": verification_policy,
         "recovery_triggered": recovery_triggered,
+        "recovery_scope": recovery_scope if recovery_triggered else None,
+        "recovery_scopes": scopes if mode == "full-restart" else [],
+        "scope_outcome_available": outcome_known,
         "final_success": final_success,
         "success": final_success,
         "initial_success": first["success"],
-        "recovered_success": recovered_success,
+        "initial_full_health_success": initial_full_health_success,
+        "recovered_success": recovery_improved_goal_outcome,
+        "recovery_completed_successfully": recovery_completed_successfully,
+        "recovery_improved_goal_outcome": recovery_improved_goal_outcome,
+        "recovery_improved_safe_outcome": recovery_improved_safe_outcome,
         "clean_episode_success": clean_episode_success,
+        "full_health_success": full_health_success,
         "ever_failed": ever_failed,
         "attempt_count": len(attempts),
         "executed_actions": sum(attempt["executed_actions"] for attempt in attempts),
         "message_count": sum(attempt["message_count"] for attempt in attempts),
         "trap_entries": trap_entries,
-        "safety_violations": trap_entries,
+        "damage_taken": damage_taken,
+        "irreversible_damage": irreversible_damage,
+        "weapon_pickups": sum(attempt["weapon_pickups"] for attempt in attempts),
+        "monsters_defeated": sum(
+            attempt["monsters_defeated"] for attempt in attempts
+        ),
+        "final_health": scope_outcome("final_health", first["final_health"]),
+        "final_inventory": scope_outcome(
+            "final_inventory", first["final_inventory"]
+        ),
+        "alive_monster_ids": scope_outcome(
+            "alive_monster_ids", first["alive_monster_ids"]
+        ),
+        "safety_violations": safety_violations,
+        "actual_harness_work": {
+            "executed_actions": sum(
+                attempt["executed_actions"] for attempt in attempts
+            ),
+            "message_count": sum(attempt["message_count"] for attempt in attempts),
+            "weapon_pickups": sum(
+                attempt["weapon_pickups"] for attempt in attempts
+            ),
+            "monsters_defeated": sum(
+                attempt["monsters_defeated"] for attempt in attempts
+            ),
+            "accounting_note": (
+                "includes the diagnostic no-recovery suffix and every restart"
+                if recovery_triggered
+                else "single executed attempt"
+            ),
+        },
+        "outcome_path": outcome_path,
         "fault_metrics": {
             key: first[key]
             for key in (
@@ -4235,6 +5811,7 @@ def run_experiment(
                 "fault_structurally_consumed",
                 "fault_structured_route_relevant_plan",
                 "fault_structured_route_relevant_executed",
+                "fault_caused_harm",
                 "fault_caused_failure",
                 "affected_stage_count",
                 "unauthorized_actions",
@@ -4269,6 +5846,19 @@ def run_experiment(
         "attempts": attempts,
         "backend_calls": len(records),
         "llm_calls": sum(1 for record in records if record.get("backend") == "llm"),
+        "transport_retry_count": sum(
+            int(record.get("transport_retry_count", 0)) for record in records
+        ),
+        "transport_backoff_ms": round(
+            sum(float(record.get("transport_backoff_ms", 0.0)) for record in records),
+            3,
+        ),
+        "plan_repair_calls": sum(
+            int(record.get("semantic_attempt", 1)) > 1 for record in records
+        ),
+        "semantic_validation_failures": sum(
+            bool(record.get("semantic_validation_error")) for record in records
+        ),
         "usage": sum_usage(records),
         "latency_ms": {
             "end_to_end": elapsed_ms(experiment_started_ns),
@@ -4344,12 +5934,17 @@ def run_scheduler_preflight(
                 "fault_structured_route_relevant_executed": attempt[
                     "fault_structured_route_relevant_executed"
                 ],
+                "fault_caused_harm": attempt["fault_caused_harm"],
                 "fault_caused_failure": attempt["fault_caused_failure"],
                 "final_success": result["final_success"],
+                "full_health_success": result["full_health_success"],
                 "trap_entries": result["trap_entries"],
+                "damage_taken": result["damage_taken"],
                 "operational_classification": (
                     "outcome_relevant"
                     if attempt["fault_caused_failure"]
+                    else "executed_with_harm"
+                    if attempt["fault_caused_harm"]
                     else "executed_without_task_failure"
                     if attempt["fault_structured_route_relevant_executed"]
                     else "plan_relevant_without_execution"
