@@ -1,24 +1,26 @@
 {
   "batch_summaries": [
-    "20261102T071625Z-phase1-evaluation-tritonai/batch-summary.json"
+    "formal-agent-only-v1/batch-summary.json"
   ],
-  "planned_run_records": 42,
+  "planned_runs": 111,
+  "planned_run_records": 111,
   "status_counts": {
-    "error": 2,
-    "ok": 40
+    "error": 1,
+    "ok": 110
   },
-  "execution_success_rate": 0.9524,
-  "task_success_rate_all_runs": 0.8095,
-  "initial_success_rate_all_runs": 0.5714,
-  "clean_episode_success_rate_all_runs": 0.5476,
-  "condition_count": 14,
-  "paired_recovery_count": 20,
-  "paired_condition_count": 7,
+  "execution_success_rate": 0.991,
+  "task_success_rate_all_runs": 0.6757,
+  "initial_success_rate_all_runs": 0.6036,
+  "clean_episode_success_rate_all_runs": 0.7778,
+  "condition_count": 37,
+  "paired_recovery_count": 67,
+  "paired_condition_count": 23,
   "outputs": {
     "run_level": "run_level.csv",
     "condition_summary": "condition_summary.csv",
     "paired_recovery": "paired_recovery.csv",
     "paired_condition_summary": "paired_condition_summary.csv",
+    "paired_condition_summary_trigger_observed": "paired_condition_summary_trigger_observed.csv",
     "failure_summary": "failure_summary.csv"
   }
 }
