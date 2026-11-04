@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "batch_name": "recovery-evaluation-v2-tritonai",
+  "archive": "formal-agent-only-v1.tar.gz",
+  "archive_sha256": "a2970e9fbdbb94877c1085af67c1d71f8f222270854e595548614925ed14383f",
+  "source_repository": {
+    "commit": "32d8dd2475fd7a968d2e29a49ee252cb05efb4aa",
+    "dirty_at_execution": false
+  },
+  "execution": {
+    "python_version": "3.14.2",
+    "backend": "llm",
+    "model": "api-glm-5.3",
+    "endpoint_host": "tritonai-api.ucsd.edu",
+    "repetitions": 3,
+    "planned_runs": 111,
+    "completed_run_records": 111,
+    "status_counts": {
+      "ok": 110,
+      "error": 1,
+      "timeout": 0
+    },
+    "created_at_utc": "2026-11-03T23:54:16.393554+00:00",
+    "finished_at_utc": "2026-11-04T02:47:31.410890+00:00"
+  },
+  "manifest": {
+    "path": "configs/evaluation_batch.json",
+    "sha256": "66c1b4beddccaf609aac8d10589dcaa9ec9cfc1c2a20212d33b9bf37dacfc865"
+  },
+  "map_sha256": {
+    "maps/evaluation/b1_three_lane_detours.json": "1c5f1c65cc647547717fbfba7bfeb468e2d3774f64e3d86bdc18eed6b10e6826",
+    "maps/evaluation/b2_corner_swap.json": "926f2474e2635abdc6c9bc6e4f06c61817796849d0ee25d2c1d8f56e2aa9c61a",
+    "maps/evaluation/b4_ladder_exchange.json": "3912d3bb65803b0b6a4dc6c27f87fa0b565c84d29fcd75107c552fb2549e3170",
+    "maps/evaluation/e1_pocket_crossing.json": "cf63e755cdeb7a21835d0ee507e84400dd75bd5111be1522f598976d30c394bf",
+    "maps/evaluation/e3_guarded_doors.json": "66b0fb842bcdb572385010a978ecbc8ba03af8afea57c6bac5060a715b1da488",
+    "maps/evaluation/e4_ladder_relay.json": "d15dfa401cada0579555f80bd1329a5986594e3733942f5a2cf675753b00fe42"
+  },
+  "archive_contents": {
+    "total_files": 555,
+    "calls_json": 111,
+    "config_json": 111,
+    "episode_summary_json": 110,
+    "events_jsonl": 110,
+    "artifacts_jsonl": 110,
+    "run_error_json": 1,
+    "batch_summary_json": 1,
+    "batch_state_json": 1
+  },
+  "sanitization": {
+    "repository_paths_replaced_with": "${REPO_ROOT}",
+    "remaining_user_home_paths_replaced_with": "${USER_HOME}",
+    "experimental_values_modified": false,
+    "common_secret_patterns_detected": false
+  }
+}
