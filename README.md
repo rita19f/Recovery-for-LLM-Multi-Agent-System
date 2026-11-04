@@ -4,19 +4,23 @@ This repository studies what happens when a message passed between LLM agents
 is wrong, and how expensive and how safe it is to recover from it.
 
 Two LLM agents move through a shared, partially observable grid. They have
-complementary private sensors (P1 senses fire, P2 senses water), so each agent
-needs facts reported by its partner to reach its goal safely. The harness
+complementary private sensors (P1 senses fire traps and fire swords, P2 senses
+water traps and ice swords), so each agent needs facts reported by its partner
+to reach its goal safely. The harness
 injects faults into these structured messages, measures whether they propagate
 into plans, unsafe actions, and failures, and compares recovery baselines.
+
+![Belief-view replay of a two-agent run](docs/media/belief-view-replay.gif)
 
 ## Workloads
 
 - **Basic maps**: fire and water traps are terminal, so reaching the goal and
   reaching it safely are the same.
-- **Extended maps**: agents have 3 HP. Monsters cost one HP per unarmed entry,
-  and single-use swords defeat them. An agent can carry only the sword type its
-  partner senses, so every sword must be learned from a partner report. Damage,
-  pickups, and defeated monsters are persistent world state.
+- **Extended maps**: there are no traps; instead, agents have 3 HP and must
+  pass fire and ice monsters. Monsters cost one HP per unarmed entry, and
+  single-use swords defeat them. An agent can carry only the sword type its
+  partner senses, so every sword must be learned from a partner report.
+  Damage, pickups, and defeated monsters are persistent world state.
 
 Each agent observes a local area, sends newly sensed facts to its partner,
 plans a short chunk of moves, and executes one move per tick.
@@ -31,11 +35,11 @@ offset, an adversarial route decoy, and an irrelevant one-time omission.
 | Clean | no fault |
 | No recovery | the faulty run continues to the end |
 | Full restart | after detection, all agent memory, messages, and plans are cleared; the physical world (positions, HP, items) is kept |
-| Always verify | every message is checked against the trusted source facts (oracle upper bound) |
+| Oracle verify (`always-verify`) | every message is checked against the trusted source facts (oracle upper bound) |
 | LLM verify | an extra LLM call checks each message against the trusted facts |
 
 No recovery and full restart share the same faulty prefix, so they are compared
-pairwise. Detection is either immediate or after the fault first causes harm.
+pairwise. Detection is either immediate or after the first fault-linked harm.
 A full environment reset is available as a development-only oracle
 (`--recovery-scope environment-reset`) and is not part of the formal matrix.
 
@@ -43,13 +47,25 @@ A full environment reset is available as a development-only oracle
 
 ```text
 configs/    batch manifests (configs/evaluation_batch.json is the formal matrix)
-docs/       experiment protocol
+docs/       experiment protocol and README media
 maps/       development maps and the six generated evaluation maps
 scripts/    harness, runners, map generator, aggregation, viewer server
 tests/      deterministic tests (no LLM calls)
 viewer/     browser replay of runs
-results/    raw runs and batches (ignored by Git) and reviewed summaries
+results/    raw runs and batches (ignored by Git), archived formal logs, and summaries
 ```
+
+## Formal results
+
+The formal evaluation ran 37 conditions with three repetitions each (111 runs)
+using `api-glm-5.3` at commit `32d8dd2`; 110 runs completed and one ended in a
+malformed-output error.
+
+- `results/summaries/`: run-level, condition-level, paired restart versus
+  no-recovery, and failure tables.
+- `results/logs/`: sanitized raw records for every run (configurations, model
+  calls, messages and other artifacts, events, and episode summaries), with a
+  checksum and provenance file. See `results/logs/README.md`.
 
 ## Setup
 
@@ -121,6 +137,7 @@ python scripts/serve_viewer.py --port 8765   # open http://127.0.0.1:8765
 - wasted work discarded by a restart and damage that a restart cannot undo;
 - verifier accuracy and cost.
 
-Errors and timeouts stay in every success denominator. See
+Errors and timeouts stay in run- and condition-level success denominators;
+paired tables use completed pairs only. See
 [docs/experiment_protocol.md](docs/experiment_protocol.md) for the full
 matrix, detection rules, and evaluation discipline.
