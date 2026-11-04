@@ -69,10 +69,8 @@ malformed-output error.
 
 ## Setup
 
-The core harness uses only the Python standard library. The formal runs use a
-self-contained conda environment pinned to CPython 3.14.2, so system or
-Homebrew upgrades cannot change the interpreter during an experiment. Do not
-install or update packages in it while a batch (or its resume) is pending:
+The core harness uses only the Python standard library. The formal runs used
+CPython 3.14.2 in a conda environment:
 
 ```bash
 conda create -n safe-mas-py314 --override-channels -c conda-forge "python=3.14.2=*_cp314"
@@ -139,5 +137,5 @@ python scripts/serve_viewer.py --port 8765   # open http://127.0.0.1:8765
 
 Errors and timeouts stay in run- and condition-level success denominators;
 paired tables use completed pairs only. See
-[docs/experiment_protocol.md](docs/experiment_protocol.md) for the full
-matrix, detection rules, and evaluation discipline.
+[docs/experiment_protocol.md](docs/experiment_protocol.md) for the evaluation
+matrix, recovery conditions, and metric definitions.
